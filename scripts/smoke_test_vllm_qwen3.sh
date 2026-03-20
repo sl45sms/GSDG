@@ -10,6 +10,27 @@
 
 set -euo pipefail
 
+CE_ENVIRONMENT="${CE_ENVIRONMENT:-}"
+if [[ -z "${CE_ENVIRONMENT}" ]]; then
+	cluster_hint="${SLURM_CLUSTER_NAME:-${SLURM_SUBMIT_HOST:-}}"
+	if [[ -z "${cluster_hint}" ]]; then
+		cluster_hint="$(hostname -s 2>/dev/null || hostname)"
+	fi
+	if [[ "${cluster_hint}" == *clariden* ]]; then
+		CE_ENVIRONMENT="qwen3-clariden"
+	else
+		CE_ENVIRONMENT="qwen3"
+	fi
+fi
+
+	# Clariden Enroot hook 89-libfabric-cxi.sh bind-mounts a host libfabric into the
+	# container, which breaks torch import for this image (HPCX MPI expects newer
+	# FABRIC symbol versions). vLLM does not require CXI/libfabric for single-node
+	# serving, so disable the hook.
+	if [[ "${CE_ENVIRONMENT}" == "qwen3-clariden" ]]; then
+		export OCI_ANNOTATION_com__hooks__cxi__enabled=false
+	fi
+
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B}"
 API_BASE="${API_BASE:-http://localhost:8000/v1}"
 HEALTH_URL="${API_BASE%/v1}/health"
@@ -41,7 +62,9 @@ fi
 
 echo "Using VLLM_HOST_IP=${VLLM_HOST_IP}" >&2
 
-srun --environment=qwen3 --ntasks=1 \
+echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
+
+srun --environment="${CE_ENVIRONMENT}" --ntasks=1 \
 	vllm serve "${MODEL_NAME}" \
 	--host 0.0.0.0 \
 	--port 8000 \
@@ -75,7 +98,7 @@ done
 
 curl -sf "${HEALTH_URL}" >/dev/null
 
-srun --environment=qwen3 --ntasks=1 python - <<'PY'
+srun --environment="${CE_ENVIRONMENT}" --ntasks=1 python - <<'PY'
 import json
 import os
 import requests
