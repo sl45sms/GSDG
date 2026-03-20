@@ -10,4 +10,5 @@ outputs/
 smoke*.log
 build*.log
 *.sqsh
+core_clariden-*
 
