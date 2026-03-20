@@ -1,6 +1,6 @@
-# Agents / Runbook (CSCS Alps → Bristen)
+# Agents / Runbook (CSCS Alps → Bristen + Clariden)
 
-This repository is designed to run **only** on CSCS Alps, on the **Bristen** cluster, using:
+This repository is designed to run on CSCS Alps, on **Bristen** (A100 / x86_64) and **Clariden** (GH200 / aarch64), using:
 
 - Slurm
 - `uenv` for build-time Python tooling on Alps
@@ -22,6 +22,7 @@ Recommended operating split:
 References:
 
 - Bristen: https://docs.cscs.ch/clusters/bristen/
+- Clariden: https://docs.cscs.ch/clusters/clariden/
 - Container Engine / EDF: https://docs.cscs.ch/software/container-engine/
 - CE quick start (`srun --environment=...`): https://docs.cscs.ch/software/container-engine/#step-2-launch-a-program
 - uenv quick start: https://docs.cscs.ch/software/uenv/
@@ -68,6 +69,22 @@ Verified on this Bristen `normal` partition on 2026-03-20:
 - Nodes expose **4 GPUs per node**, not 8. `sinfo` reports `gpu:4` and node `CfgTRES` confirms `gres/gpu=4`.
 - A single-node 4-GPU smoke test with `tensor_parallel_size=4`, `--language-model-only`, and `--max-model-len 8192` still reached **CUDA OOM during model load** for `Qwen/Qwen3.5-397B-A17B`.
 - Practical consequence: this model does **not** fit on one Bristen node in the validated configuration. A real serving run will need a **multi-node setup** on Bristen or a different cluster/resource shape.
+
+---
+
+## 1b) Clariden notes (GH200 / aarch64)
+
+- Clariden nodes are GH200, which means the host architecture is **aarch64**.
+- You must run an **aarch64-compatible container image** on Clariden.
+	- If you try to start an x86_64 `.sqsh` on Clariden, Pyxis/Enroot may fail extremely early in container startup; a common symptom is:
+		- `pyxis: [ERROR] Failed to refresh the dynamic linker cache`
+		- `/etc/enroot/hooks.d/87-slurm.sh exited with return code 1`
+
+Repo convention:
+
+- Bristen CE environment name: `qwen3` (expects `~/.edf/qwen3.toml`)
+- Clariden CE environment name: `qwen3-clariden` (expects `~/.edf/qwen3-clariden.toml`)
+- The Slurm scripts in `scripts/` auto-select between these using `SLURM_CLUSTER_NAME` / `SLURM_SUBMIT_HOST`.
 
 ---
 
