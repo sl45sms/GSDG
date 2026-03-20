@@ -16,6 +16,7 @@ HEALTH_URL="${API_BASE%/v1}/health"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
+export MODEL_NAME
 
 detect_vllm_host_ip() {
 	local interface_name
