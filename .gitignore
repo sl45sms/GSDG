@@ -11,4 +11,10 @@ smoke*.log
 build*.log
 *.sqsh
 core_clariden-*
+*.txt
+*.log
+*.err
+*.status
+.last_*
+*.count
 
