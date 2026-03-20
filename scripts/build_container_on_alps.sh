@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+CONTAINERFILE="${CONTAINERFILE:-Containerfile}"
 IMAGE_TAG="${IMAGE_TAG:-gsdg-qwen3:latest}"
 SQSH_PATH="${SQSH_PATH:-${SCRATCH}/images/gsdg-qwen3_latest.sqsh}"
 STORAGE_CONF_DIR="${HOME}/.config/containers"
@@ -19,7 +20,7 @@ EOF
 fi
 
 mkdir -p "$(dirname "${SQSH_PATH}")"
-podman build -t "${IMAGE_TAG}" .
+podman build -f "${CONTAINERFILE}" -t "${IMAGE_TAG}" .
 if [[ -f "${SQSH_PATH}" ]]; then
 	rm -f "${SQSH_PATH}"
 fi

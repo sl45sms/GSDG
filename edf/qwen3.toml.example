@@ -1,3 +1,8 @@
+# Bristen (A100 / x86_64) environment definition.
+#
+# For Clariden (GH200 / aarch64), use the separate template:
+#   edf/qwen3_clariden.toml.example
+
 image = "${SCRATCH}/images/gsdg-qwen3_latest.sqsh"
 mounts = ["${SCRATCH}:${SCRATCH}"]
 workdir = "${SCRATCH}"
@@ -6,7 +11,9 @@ workdir = "${SCRATCH}"
 HF_HOME = "${SCRATCH}/hf"
 TRANSFORMERS_CACHE = "${SCRATCH}/hf"
 HF_DATASETS_CACHE = "${SCRATCH}/hf_datasets"
-HF_TOKEN = "${HF_TOKEN}"
+# Optional: only required for gated models/datasets.
+# If unset, Pyxis may fail variable expansion unless we provide a default.
+HF_TOKEN = "${HF_TOKEN:-}"
 
 # Bristen-safe defaults for vLLM distributed startup.
 NCCL_SOCKET_IFNAME = "hsn0"
