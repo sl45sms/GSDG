@@ -11,6 +11,19 @@
 
 set -euo pipefail
 
+CE_ENVIRONMENT="${CE_ENVIRONMENT:-}"
+if [[ -z "${CE_ENVIRONMENT}" ]]; then
+	cluster_hint="${SLURM_CLUSTER_NAME:-${SLURM_SUBMIT_HOST:-}}"
+	if [[ -z "${cluster_hint}" ]]; then
+		cluster_hint="$(hostname -s 2>/dev/null || hostname)"
+	fi
+	if [[ "${cluster_hint}" == *clariden* ]]; then
+		CE_ENVIRONMENT="qwen3-clariden"
+	else
+		CE_ENVIRONMENT="qwen3"
+	fi
+fi
+
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B}"
 DATASET_SPLIT="${DATASET_SPLIT:-train}"
 PREFETCH_DATASETS="${PREFETCH_DATASETS:-}"
@@ -49,4 +62,6 @@ if [[ -n "${PREFETCH_DATASETS}" ]]; then
 	echo "Prefetch datasets: ${PREFETCH_DATASETS}" >&2
 fi
 
-srun --environment=qwen3 --export=ALL,HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET}" --ntasks=1 "${PREFETCH_ARGS[@]}"
+echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
+
+srun --environment="${CE_ENVIRONMENT}" --export=ALL,HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET}" --ntasks=1 "${PREFETCH_ARGS[@]}"
