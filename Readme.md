@@ -5,7 +5,7 @@ This repository generates Greek synthetic question and answer pairs from GlossAP
 The recommended operating model is:
 
 - `uenv` for build-time Python tooling and local validation on Alps.
-- CSCS Container Engine for the final runtime under Slurm.
+- CSCS Container Engine for the final runtime under Slurm (Bristen and Clariden).
 
 ## What is implemented
 
@@ -29,7 +29,9 @@ The recommended operating model is:
 - `scripts/prefetch_hf_assets.sh`: Slurm job to warm model and dataset caches in `${SCRATCH}`.
 - `scripts/run_gsdg_qwen3.sh`: single-job Slurm example.
 - `edf/qwen3.toml.example`: CE environment template.
+- `edf/qwen3_clariden.toml.example`: CE environment template for Clariden (GH200 / aarch64).
 - `Containerfile`: container build recipe.
+- `Containerfile.clariden`: container build recipe for Clariden (GH200 / aarch64).
 
 The EDF uses Pyxis-compatible variable expansion only. Avoid shell-style defaults like `${VAR:-default}` in CE environment files.
 
@@ -69,6 +71,23 @@ Build and import the runtime image after you have validated the Python code in `
 ./scripts/build_container_on_alps.sh
 ```
 
+This builds the default (Bristen / x86_64) image from `Containerfile` and imports it to `${SCRATCH}/images/gsdg-qwen3_latest.sqsh`.
+
+### Clariden (GH200 / aarch64)
+
+Clariden compute nodes are GH200 (ARM/aarch64). You must use an aarch64-compatible image there.
+
+Build and import the Clariden image using the Clariden Containerfile and a different output path:
+
+```bash
+CONTAINERFILE=Containerfile.clariden \
+IMAGE_TAG=gsdg-qwen3-clariden:latest \
+SQSH_PATH=${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh \
+./scripts/build_container_on_alps.sh
+```
+
+If you see Pyxis/Enroot fail very early with messages like "Failed to refresh the dynamic linker cache" on Clariden, it is usually a sign that an x86_64 image is being started on an aarch64 node.
+
 This creates the SquashFS image used by CE at `${SCRATCH}/images/gsdg-qwen3_latest.sqsh` by default.
 
 For Qwen3.5, the container installs the latest Hugging Face `transformers` from `main` and the nightly `vLLM` wheel stream, matching the model card guidance that current released `vLLM` is not sufficient.
@@ -83,6 +102,8 @@ Warm the HuggingFace caches before the main run so later jobs can reuse the weig
 export PREFETCH_DATASETS=glossAPI/<dataset_name>
 sbatch scripts/prefetch_hf_assets.sh
 ```
+
+The Slurm scripts default to using `--environment=qwen3` on Bristen and `--environment=qwen3-clariden` on Clariden, based on `SLURM_CLUSTER_NAME` / `SLURM_SUBMIT_HOST`. Override explicitly with `CE_ENVIRONMENT=...` if needed.
 
 You can prefetch multiple datasets by separating them with commas:
 
@@ -152,5 +173,11 @@ sbatch scripts/run_gsdg_qwen3.sh
 - Output is appended to the target JSONL file so interrupted jobs can be resumed carefully by changing `--start-row`.
 
 See `Agents.md` for the full Bristen runbook and cluster-specific operational guidance.
+
+## Clariden runtime workflow
+
+1. Build/import the Clariden image (see above).
+2. Copy `edf/qwen3_clariden.toml.example` to `~/.edf/qwen3-clariden.toml` and adjust the `image = ...` path if needed.
+3. Submit the same Slurm scripts; they will default to `qwen3-clariden` automatically on Clariden.
 
 
