@@ -10,6 +10,19 @@
 
 set -euo pipefail
 
+CE_ENVIRONMENT="${CE_ENVIRONMENT:-}"
+if [[ -z "${CE_ENVIRONMENT}" ]]; then
+	cluster_hint="${SLURM_CLUSTER_NAME:-${SLURM_SUBMIT_HOST:-}}"
+	if [[ -z "${cluster_hint}" ]]; then
+		cluster_hint="$(hostname -s 2>/dev/null || hostname)"
+	fi
+	if [[ "${cluster_hint}" == *clariden* ]]; then
+		CE_ENVIRONMENT="qwen3-clariden"
+	else
+		CE_ENVIRONMENT="qwen3"
+	fi
+fi
+
 DATASET_NAME="${DATASET_NAME:?Set DATASET_NAME to a glossAPI dataset name}"
 DATASET_SPLIT="${DATASET_SPLIT:-train}"
 OUTPUT_PATH="${OUTPUT_PATH:-${SCRATCH}/synthetic_chatml_small.jsonl}"
@@ -43,7 +56,9 @@ fi
 
 echo "Using VLLM_HOST_IP=${VLLM_HOST_IP}" >&2
 
-srun --environment=qwen3 --ntasks=1 \
+echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
+
+srun --environment="${CE_ENVIRONMENT}" --ntasks=1 \
 	vllm serve "${MODEL_NAME}" \
 	--host 0.0.0.0 \
 	--port 8000 \
@@ -87,4 +102,4 @@ GENERATOR_ARGS=(
 	--max-rows "${MAX_ROWS}"
 )
 
-srun --environment=qwen3 --ntasks=1 "${GENERATOR_ARGS[@]}"
+srun --environment="${CE_ENVIRONMENT}" --ntasks=1 "${GENERATOR_ARGS[@]}"
