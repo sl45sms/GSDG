@@ -8,4 +8,6 @@ build/
 outputs/
 *.out
 smoke*.log
+build*.log
+*.sqsh
 
