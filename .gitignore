@@ -15,6 +15,7 @@ core_clariden-*
 *.log
 *.err
 *.status
+*.copy
 .last_*
 *.count
 
