@@ -86,6 +86,13 @@ Repo convention:
 - Clariden CE environment name: `qwen3-clariden` (expects `~/.edf/qwen3-clariden.toml`)
 - The Slurm scripts in `scripts/` auto-select between these using `SLURM_CLUSTER_NAME` / `SLURM_SUBMIT_HOST`.
 
+Convenience wrappers (repo root):
+
+- `smoke_test_32b.sh`: submits a 32B vLLM smoke on Clariden.
+- `prefetch_32b.sh`: prefetches the `Qwen/Qwen3-32B` weights.
+- `prefetch_datasets.sh`: prefetches one or more datasets (safe with comma-separated lists).
+- `run_single_dataset_32b.sh`: full run for `glossAPI/Sxolika_vivlia` + `Qwen/Qwen3-32B`.
+
 ---
 
 ## 2) Build-time Python via uenv
@@ -169,6 +176,8 @@ Build the OCI image:
 
 The helper script wraps both `podman build` and `enroot import`. It defaults to writing `${SCRATCH}/images/gsdg-qwen3_latest.sqsh`.
 
+Clariden note: if Podman-based builds are unreliable on Clariden, the repo also provides `scripts/build_clariden_vllm_src_image.sh`, which builds a working Clariden `.sqsh` using an Enroot rootfs + `mksquashfs` export.
+
 ---
 
 ## 4) Create an EDF for the Qwen3 image
@@ -198,7 +207,9 @@ HF_TOKEN = "${HF_TOKEN}"
 #   set +a
 ```
 
-Note: CE/Pyxis EDF files do not support shell-style default expansion like `${VAR:-default}`. Use plain `${VAR}` passthroughs or fixed literal values.
+Note: EDF variable expansion is intentionally limited. Prefer plain `${VAR}` passthroughs.
+
+In this repo, the EDF templates use `${VAR:-}` for a few optional variables (e.g. `HF_TOKEN`, `VLLM_HOST_IP`) so that an unset variable can expand to the empty string on systems where this is supported. If your CE/Pyxis setup rejects `${VAR:-}`, replace it with `${VAR}` and ensure the variable is always defined in the host environment (it can be an empty string).
 
 Tip: CE also supports pulling remote images automatically (e.g. `image = "nvcr.io#..."`), but for large ML stacks the `.sqsh` path is typically faster and more reproducible.
 
@@ -363,6 +374,8 @@ For Clariden, also see the general Slurm guidance for GH200 nodes: https://docs.
 
 Because CE shares one container per node for all tasks on that node, you can use separate `srun` commands for “server” and “client” within the same batch script if you want.
 
+On Clariden, creating multiple Slurm steps in quick succession can fail transiently with “step creation temporarily disabled”. The repo scripts avoid this by running server + healthcheck + generator in a single `srun` step (see `scripts/smoke_test_vllm_qwen3.sh` and `scripts/run_gsdg_qwen3.sh`).
+
 #### One-job example (server + generator)
 
 This pattern runs everything in one job allocation on a single node:
@@ -380,29 +393,11 @@ This pattern runs everything in one job allocation on a single node:
 
 set -euo pipefail
 
-# 1) Start vLLM server in the background
-srun --environment=qwen3 --ntasks=1 \
-	vllm serve Qwen/Qwen3.5-397B-A17B \
-	--host 0.0.0.0 --port 8000 \
-	--tensor-parallel-size 8 \
-	--dtype bfloat16 \
-	--max-model-len 32768 \
-	--reasoning-parser qwen3 \
-	--language-model-only &
-
-# 2) Wait until the health endpoint is up
-until curl -sf http://localhost:8000/health >/dev/null; do
-	sleep 2
-done
-
-# 3) Run the generator (replace with your script)
-# Example CLI (you will implement this script in this repo):
-srun --environment=qwen3 --ntasks=1 \
-	python your_generator.py \
-		--dataset glossAPI/<dataset_name> \
-		--split train \
-		--out ${SCRATCH}/synthetic_chatml.jsonl \
-		--api-base http://localhost:8000/v1
+# In this repo, prefer the provided single-job script (it handles cluster
+# differences and avoids multi-step issues on Clariden):
+export DATASET_NAME=glossAPI/<dataset_name>
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml.jsonl
+sbatch scripts/run_gsdg_qwen3.sh
 ```
 
 If you prefer two `srun` steps with different resource shapes (e.g. more CPUs for the generator), split them and adjust `--cpus-per-task`.
@@ -472,6 +467,8 @@ If you point HuggingFace caches to a **persistent filesystem** (typically `${SCR
 - Subsequent jobs/container starts reuse the cached files, so weights are **not re-downloaded** unless the cache is deleted/evicted.
 
 Practical tip: do a one-time prefetch job with `scripts/prefetch_hf_assets.sh` so later inference jobs start faster.
+
+Note: some datasets on the Hub are “docs-only” (no loadable dataset files). The prefetch script treats those as warnings and continues (e.g. `glossAPI/istorima`).
 
 Caveats:
 

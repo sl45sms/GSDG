@@ -13,7 +13,7 @@ The recommended operating model is:
 - Text extraction heuristics for heterogeneous GlossAPI schemas.
 - A strict Greek prompt template that asks Qwen3.5 for exactly one question/answer pair per row.
 - `uenv` and container build scaffolding for CSCS Bristen.
-- Container and Slurm runtime scaffolding for running the workflow on CSCS Bristen.
+- Container and Slurm runtime scaffolding for running the workflow on CSCS Bristen and Clariden.
 
 ## Repository layout
 
@@ -28,12 +28,18 @@ The recommended operating model is:
 - `scripts/build_container_on_alps.sh`: build and import the CE image on Alps.
 - `scripts/prefetch_hf_assets.sh`: Slurm job to warm model and dataset caches in `${SCRATCH}`.
 - `scripts/run_gsdg_qwen3.sh`: single-job Slurm example.
+- `smoke_test_32b.sh`: convenience wrapper for a 32B vLLM smoke test on Clariden.
+- `prefetch_32b.sh`: convenience wrapper to prefetch `Qwen/Qwen3-32B` weights.
+- `prefetch_datasets.sh`: convenience wrapper to prefetch one or more datasets.
+- `run_single_dataset_32b.sh`: convenience wrapper for a full run on `glossAPI/Sxolika_vivlia`.
 - `edf/qwen3.toml.example`: CE environment template.
 - `edf/qwen3_clariden.toml.example`: CE environment template for Clariden (GH200 / aarch64).
 - `Containerfile`: container build recipe.
 - `Containerfile.clariden`: container build recipe for Clariden (GH200 / aarch64).
 
-The EDF uses Pyxis-compatible variable expansion only. Avoid shell-style defaults like `${VAR:-default}` in CE environment files.
+The EDF uses Pyxis-compatible variable expansion only. Keep it simple (plain `${VAR}` passthroughs).
+
+Note: in this repo the EDF templates use `${VAR:-}` for a few optional variables so that an unset variable can expand to the empty string on systems where this is supported. If your CE/Pyxis setup rejects `${VAR:-}`, replace it with `${VAR}` and ensure the variable is always defined in the host environment (it can be an empty string).
 
 ## Build-time setup with uenv
 
@@ -86,11 +92,15 @@ SQSH_PATH=${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh \
 ./scripts/build_container_on_alps.sh
 ```
 
+Alternative (Clariden-native build): this repo also provides `scripts/build_clariden_vllm_src_image.sh`, which builds a working Clariden `.sqsh` by creating an Enroot rootfs from a base image and installing the Python/vLLM stack into `/opt/gsdg-venv`, then exporting via `mksquashfs`.
+
 If you see Pyxis/Enroot fail very early with messages like "Failed to refresh the dynamic linker cache" on Clariden, it is usually a sign that an x86_64 image is being started on an aarch64 node.
 
-This creates the SquashFS image used by CE at `${SCRATCH}/images/gsdg-qwen3_latest.sqsh` by default.
+This creates the SquashFS image at the `SQSH_PATH` you set (for Clariden, typically `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh`).
 
-For Qwen3.5, the container installs the latest Hugging Face `transformers` from `main` and the nightly `vLLM` wheel stream, matching the model card guidance that current released `vLLM` is not sufficient.
+For Clariden you should use the Clariden output path `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh` and the corresponding EDF template `edf/qwen3_clariden.toml.example`.
+
+For Clariden, the working image in this repo builds vLLM `v0.17.1` and installs a compatible `transformers` version by default. If you need bleeding-edge Qwen3.5 support, you may need to install Transformers from `main` and/or use a newer vLLM.
 
 If `~/.config/containers/storage.conf` does not exist yet, the helper script creates one that points Podman storage at `/dev/shm/$USER`. This avoids rootless overlay failures on home-backed network filesystems.
 
@@ -146,10 +156,12 @@ Override Slurm resources at submission time if needed:
 sbatch --cpus-per-task=8 --mem=64G scripts/prefetch_hf_assets.sh
 ```
 
+If you pass a comma-separated dataset list via a wrapper script, prefer `./prefetch_datasets.sh` (it handles Slurm `--export` comma semantics safely).
+
 ## Bristen runtime workflow
 
 1. Use `uenv` to create a current Python environment and validate the generator.
-2. Build the runtime container and import it to `${SCRATCH}/images/gsdg-qwen3_latest.sqsh`.
+2. Build the runtime container and import it to `${SCRATCH}/images/gsdg-qwen3_latest.sqsh` (Bristen) or `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh` (Clariden).
 3. Copy `edf/qwen3.toml.example` to `~/.edf/qwen3.toml` and fill any environment-specific values.
 4. Optionally prefetch the model and datasets into `${SCRATCH}` with `scripts/prefetch_hf_assets.sh`.
 5. Submit `scripts/run_gsdg_qwen3.sh` with the required environment variables.
@@ -171,6 +183,11 @@ sbatch scripts/run_gsdg_qwen3.sh
 - The runtime launch uses `--language-model-only` because this pipeline is text-only and Qwen3.5 is a multimodal model.
 - If a row has no usable text fields, it is skipped and logged.
 - Output is appended to the target JSONL file so interrupted jobs can be resumed carefully by changing `--start-row`.
+
+Clariden-specific notes:
+
+- Some Clariden configurations can transiently reject multiple Slurm steps (“step creation temporarily disabled”). The provided scripts run server + health + one request / generation inside a single `srun` step to avoid this.
+- The Slurm scripts may “stage” the current repo into `$SCRATCH` and set `PYTHONPATH` inside the container so that small Python changes take effect without rebuilding the `.sqsh`. Disable with `STAGE_WORKSPACE=0`.
 
 See `Agents.md` for the full Bristen runbook and cluster-specific operational guidance.
 
