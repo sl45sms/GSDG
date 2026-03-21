@@ -16,7 +16,9 @@ RUN python -m venv --system-site-packages "$VIRTUAL_ENV" \
     && python -m pip install --upgrade "setuptools<81" wheel cmake ninja setuptools_scm \
     && mkdir -p /tmp/wheels \
     && VLLM_USE_PRECOMPILED=0 CUDA_HOME=/usr/local/cuda-13.1 python -m pip wheel --no-build-isolation --no-deps -w /tmp/wheels "vllm @ git+https://github.com/vllm-project/vllm.git@v0.17.1" \
-    && python -m pip install --no-deps /tmp/wheels/vllm-*.whl
+    && python -m pip install --no-deps /tmp/wheels/vllm-*.whl \
+    && python -m pip install "flashinfer-python==0.6.4" "flashinfer-cubin==0.6.4" \
+    && python -m flashinfer show-config
 
 COPY src /workspace/src
 COPY scripts /workspace/scripts
