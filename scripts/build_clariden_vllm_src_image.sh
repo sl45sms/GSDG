@@ -40,8 +40,10 @@ export ENROOT_SLURM_HOOK=off
 export OCI_ANNOTATION_com__hooks__cxi__enabled=false
 
 # Stream the workspace into the container without a persistent bind mount.
+# Bind-mount $SCRATCH at a dedicated path for caching (safe: it does not
+# shadow any system paths inside the rootfs).
 tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md | \
-	enroot start --rw "$NAME" bash -lc '
+	enroot start --rw --mount "${SCRATCH}:/mnt/cache" "$NAME" bash -lc '
   set -euo pipefail
   set -x
 
@@ -58,18 +60,57 @@ tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md | \
 
   python -m pip install --upgrade pip
   python -m pip install -r /workspace/requirements.txt
-  python -m pip install "transformers @ git+https://github.com/huggingface/transformers.git@main" tokenizers safetensors
-  python -m pip install --upgrade setuptools wheel cmake ninja setuptools_scm
+
+  # Keep Transformers within vLLM declared constraint (<5) for stability.
+  # If you need bleeding-edge Qwen3.5 support, build vLLM from main and set
+  # INSTALL_TRANSFORMERS_MAIN=1.
+  if [[ "${INSTALL_TRANSFORMERS_MAIN:-0}" == "1" ]]; then
+    python -m pip install "transformers @ git+https://github.com/huggingface/transformers.git@main" tokenizers safetensors
+  else
+    python -m pip install "transformers>=4.56.0,<5" tokenizers safetensors
+  fi
+
+  # vLLM 0.17.1 declares setuptools<81 for Py3.12; keep within that range.
+  python -m pip install --upgrade "setuptools<81" wheel cmake ninja setuptools_scm
 
   export CUDA_HOME=/usr/local/cuda-13.1
   export VLLM_USE_PRECOMPILED=0
   export LD_LIBRARY_PATH=/usr/lib:${LD_LIBRARY_PATH:-}
   export MAX_JOBS=8
   export CMAKE_BUILD_PARALLEL_LEVEL=8
-  python -m pip install --no-build-isolation --no-deps "vllm @ git+https://github.com/vllm-project/vllm.git@v0.17.1"
 
-  # Minimal runtime deps for `vllm serve` (keep this lean to avoid huge optional installs).
-  python -m pip install fastapi "uvicorn[standard]" pydantic prometheus_client
+  mkdir -p /mnt/cache/wheels
+  VLLM_WHEEL_GLOB="/mnt/cache/wheels/vllm-0.17.1+cu131-*.whl"
+  if compgen -G "$VLLM_WHEEL_GLOB" >/dev/null; then
+    python -m pip install --no-deps $VLLM_WHEEL_GLOB
+  else
+    python -m pip wheel --no-build-isolation --no-deps -w /mnt/cache/wheels \
+      "vllm @ git+https://github.com/vllm-project/vllm.git@v0.17.1"
+    python -m pip install --no-deps $VLLM_WHEEL_GLOB
+  fi
+
+  # Minimal runtime deps for `vllm serve`.
+  # vLLM imports some utilities unconditionally at CLI startup (e.g. cbor2 hashing),
+  # so we install a small set of lightweight packages while still avoiding the
+  # large optional stack (ray, opencv, torchaudio, etc.).
+  python -m pip install \
+    fastapi "uvicorn[standard]" pydantic prometheus_client prometheus-fastapi-instrumentator \
+    cbor2 blake3 cachetools cloudpickle diskcache msgspec pybase64 setproctitle ijson \
+    "gguf>=0.17.0" "compressed-tensors==0.13.0" "depyf==0.20.0"
+
+  # Required by the OpenAI-compatible entrypoint.
+  python -m pip install "openai>=1.99.1,<2.25.0" "openai-harmony>=0.0.3" mistral-common
+
+  # Imported by the OpenAI server stack (SageMaker router).
+  python -m pip install "model-hosting-container-standards>=0.1.13,<1.0.0"
+
+  # Structured-output helpers imported by vLLM V1.
+  python -m pip install \
+    "llguidance>=1.3.0,<1.4.0" \
+    "lm-format-enforcer==0.11.3" \
+    partial-json-parser \
+    "xgrammar==0.1.29" \
+    "outlines_core==0.2.11"
 
   python -c "import vllm; print(\"vllm_version=\" + vllm.__version__)"
 '
@@ -88,6 +129,7 @@ if [[ -z "$ROOTFS" ]]; then
 fi
 
 log "mksquashfs export"
-mksquashfs "$ROOTFS" "$OUT_SQSH" -comp zstd -b 131072 -noappend -all-root
+mksquashfs "$ROOTFS" "$OUT_SQSH" -comp zstd -b 131072 -noappend -all-root \
+  -e etc/motd etc/xthostname mnt/cache
 
 log "DONE"
