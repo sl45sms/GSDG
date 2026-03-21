@@ -3,6 +3,7 @@ import logging
 import os
 
 from datasets import load_dataset
+from datasets.exceptions import DataFilesNotFoundError
 from huggingface_hub import snapshot_download
 
 
@@ -109,7 +110,20 @@ def main() -> int:
         if not args.dataset:
             LOGGER.warning("No datasets requested; skipping dataset prefetch")
         for dataset_name in args.dataset:
-            prefetch_dataset(dataset_name, args.split, token)
+            try:
+                prefetch_dataset(dataset_name, args.split, token)
+            except DataFilesNotFoundError as exc:
+                # Some repos exist on the Hub but only contain documentation,
+                # not actual dataset files (e.g. just README/DATASET_ACCESS).
+                # Treat as a warning so other datasets still get prefetched.
+                LOGGER.warning(
+                    "Skipping dataset %s: no supported data files found (%s)",
+                    dataset_name,
+                    exc,
+                )
+            except Exception:
+                # Keep prefetch best-effort across multiple datasets.
+                LOGGER.exception("Failed to prefetch dataset %s", dataset_name)
 
     LOGGER.info("Prefetch completed successfully")
 
