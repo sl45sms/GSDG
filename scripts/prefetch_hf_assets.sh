@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+STAGE_WORKSPACE="${STAGE_WORKSPACE:-1}"
+STAGE_ROOT="${STAGE_ROOT:-${SCRATCH}/gsdg_workspace_${SLURM_JOB_ID}}"
+
 CE_ENVIRONMENT="${CE_ENVIRONMENT:-}"
 if [[ -z "${CE_ENVIRONMENT}" ]]; then
 	cluster_hint="${SLURM_CLUSTER_NAME:-${SLURM_SUBMIT_HOST:-}}"
@@ -41,8 +44,21 @@ PREFETCH_LOG_LEVEL="${PREFETCH_LOG_LEVEL:-INFO}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/gsdg-venv/bin/python}"
 PYTHONPATH_VALUE="${PYTHONPATH_VALUE:-/workspace/src}"
 
+PREFETCH_ENTRYPOINT="/workspace/scripts/prefetch_hf_assets.py"
+
+if [[ "${STAGE_WORKSPACE}" != "0" ]]; then
+	# The CE container image typically bakes the repo into /workspace. To avoid
+	# rebuilding the .sqsh for small Python changes, stage the current workspace
+	# into $SCRATCH (mounted into the container) and point PYTHONPATH at it.
+	rm -rf "${STAGE_ROOT}"
+	mkdir -p "${STAGE_ROOT}"
+	tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md TLTR.md Agents.md | tar -xz -C "${STAGE_ROOT}"
+	PYTHONPATH_VALUE="${STAGE_ROOT}/src"
+	PREFETCH_ENTRYPOINT="${STAGE_ROOT}/scripts/prefetch_hf_assets.py"
+fi
+
 PREFETCH_ARGS=(
-	"${PYTHON_BIN}" /workspace/scripts/prefetch_hf_assets.py
+	"${PYTHON_BIN}" "${PREFETCH_ENTRYPOINT}"
 	--model "${MODEL_NAME}"
 	--split "${DATASET_SPLIT}"
 	--log-level "${PREFETCH_LOG_LEVEL}"
