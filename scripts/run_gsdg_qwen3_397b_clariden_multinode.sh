@@ -26,18 +26,20 @@ VLLM_HOST_IP="${VLLM_HOST_IP:-}"
 export VLLM_HOST_IP
 VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING:-1}"
 export VLLM_ENABLE_V1_MULTIPROCESSING
+VLLM_ALLREDUCE_USE_SYMM_MEM="${VLLM_ALLREDUCE_USE_SYMM_MEM:-0}"
+export VLLM_ALLREDUCE_USE_SYMM_MEM
 
 DATASET_NAME="${DATASET_NAME:?Set DATASET_NAME to a glossAPI dataset name}"
 DATASET_SPLIT="${DATASET_SPLIT:-train}"
 OUTPUT_PATH="${OUTPUT_PATH:-${SCRATCH}/synthetic_chatml_397b.jsonl}"
 API_BASE="${API_BASE:-http://localhost:8000/v1}"
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B-FP8}"
 MAX_ROWS="${MAX_ROWS:-}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MASTER_PORT="${MASTER_PORT:-29501}"
 RAY_PORT="${RAY_PORT:-6379}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
-PIPELINE_PARALLEL_SIZE="${PIPELINE_PARALLEL_SIZE:-1}"
+PIPELINE_PARALLEL_SIZE="${PIPELINE_PARALLEL_SIZE:-}"
 REASONING_PARSER="${REASONING_PARSER:-}"
 
 if [[ -z "${SLURM_JOB_NODELIST:-}" || -z "${SLURM_NNODES:-}" ]]; then
@@ -45,10 +47,24 @@ if [[ -z "${SLURM_JOB_NODELIST:-}" || -z "${SLURM_NNODES:-}" ]]; then
 	exit 1
 fi
 
+if [[ -z "${PIPELINE_PARALLEL_SIZE}" ]]; then
+	if [[ "${MODEL_NAME}" == "Qwen/Qwen3.5-397B-A17B" && "${SLURM_NNODES}" -ge 4 ]]; then
+		PIPELINE_PARALLEL_SIZE=2
+	else
+		PIPELINE_PARALLEL_SIZE=1
+	fi
+fi
+
 EXPECTED_WORLD_SIZE=$((SLURM_NNODES * 4))
 if (( TENSOR_PARALLEL_SIZE * PIPELINE_PARALLEL_SIZE != EXPECTED_WORLD_SIZE )); then
 	echo "This launcher expects TP x PP (${TENSOR_PARALLEL_SIZE} x ${PIPELINE_PARALLEL_SIZE}) to match total allocated GPUs (${EXPECTED_WORLD_SIZE})." >&2
-	echo "The current 397B Clariden path is 2 nodes x 4 GPUs with TP=8 and PP=1." >&2
+	echo "Examples: FP8 on 2 nodes uses TP=8, PP=1; bf16 on 4 nodes can use TP=8, PP=2." >&2
+	exit 1
+fi
+
+if [[ "${MODEL_NAME}" == "Qwen/Qwen3.5-397B-A17B" && "${EXPECTED_WORLD_SIZE}" -le 8 ]]; then
+	echo "The bf16 397B checkpoint is known to OOM on Clariden at 2 nodes / 8 GPUs during vLLM profile_run." >&2
+	echo "Use the default FP8 checkpoint (Qwen/Qwen3.5-397B-A17B-FP8) or request 4 nodes / 16 GPUs with TENSOR_PARALLEL_SIZE=8 and PIPELINE_PARALLEL_SIZE=2." >&2
 	exit 1
 fi
 
@@ -91,7 +107,7 @@ SRUN_EXPORT="ALL"
 if [[ -n "${PYTHONPATH_VALUE}" ]]; then
 	SRUN_EXPORT+=",PYTHONPATH=${PYTHONPATH_VALUE}"
 fi
-SRUN_EXPORT+=",MASTER_ADDR=${MASTER_ADDR},MASTER_PORT=${MASTER_PORT},RAY_PORT=${RAY_PORT},GENERATOR_ENTRYPOINT=${GENERATOR_ENTRYPOINT},VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}"
+SRUN_EXPORT+=",MASTER_ADDR=${MASTER_ADDR},MASTER_PORT=${MASTER_PORT},RAY_PORT=${RAY_PORT},GENERATOR_ENTRYPOINT=${GENERATOR_ENTRYPOINT},VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING},VLLM_ALLREDUCE_USE_SYMM_MEM=${VLLM_ALLREDUCE_USE_SYMM_MEM}"
 
 srun --environment="${CE_ENVIRONMENT}" \
 	--export="${SRUN_EXPORT}" \
@@ -102,6 +118,7 @@ set -euo pipefail
 
 unset VLLM_NNODES || true
 export VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING}"
+export VLLM_ALLREDUCE_USE_SYMM_MEM="${VLLM_ALLREDUCE_USE_SYMM_MEM}"
 
 detect_vllm_host_ip() {
 	local route_target interface_name detected_ip
@@ -166,17 +183,24 @@ fi
 
 echo "Node ${SLURM_NODEID}: VLLM_HOST_IP=${VLLM_HOST_IP}" >&2
 echo "Node ${SLURM_NODEID}: VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}" >&2
+echo "Node ${SLURM_NODEID}: VLLM_ALLREDUCE_USE_SYMM_MEM=${VLLM_ALLREDUCE_USE_SYMM_MEM}" >&2
 
 SERVER_LOG="${PWD}/vllm-397b-node${SLURM_NODEID}.log"
 RAY_LOG="${PWD}/ray-397b-node${SLURM_NODEID}.log"
 RAY_HEAD_IP_FILE="${SCRATCH}/ray-head-ip-${SLURM_JOB_ID}.txt"
 RAY_STOP_FILE="${SCRATCH}/ray-stop-${SLURM_JOB_ID}.flag"
+RAY_SESSION_ARCHIVE_DIR="${SCRATCH}/ray-session-${SLURM_JOB_ID}-node${SLURM_NODEID}"
 
 cleanup() {
 	touch "$RAY_STOP_FILE" || true
 	if [[ -n "${server_pid:-}" ]] && kill -0 "$server_pid" >/dev/null 2>&1; then
 		kill "$server_pid" >/dev/null 2>&1 || true
 		wait "$server_pid" >/dev/null 2>&1 || true
+	fi
+	if [[ -d /tmp/ray/session_latest ]]; then
+		rm -rf "$RAY_SESSION_ARCHIVE_DIR" || true
+		mkdir -p "$RAY_SESSION_ARCHIVE_DIR" || true
+		cp -a /tmp/ray/session_latest/. "$RAY_SESSION_ARCHIVE_DIR"/ >/dev/null 2>&1 || true
 	fi
 	ray stop -f >/dev/null 2>&1 || true
 }
