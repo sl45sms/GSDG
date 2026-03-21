@@ -65,4 +65,9 @@ sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
 ```
 
 This launcher uses 2 Clariden nodes with 4 GPUs per node, configured as
-`tensor_parallel_size=4` and `pipeline_parallel_size=2`.
+`tensor_parallel_size=8` and `pipeline_parallel_size=1`.
+
+Current status: the launcher wiring is fixed, but the currently built Clariden
+image still fails in vLLM multi-node `mp` worker startup with `inner dp world
+group is not initialized`. Rebuild the Clariden image from `Containerfile.clariden`
+before the next 397B validation run so Ray is available in the runtime image.
