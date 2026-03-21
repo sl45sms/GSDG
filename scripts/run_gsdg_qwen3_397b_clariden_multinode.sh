@@ -71,15 +71,17 @@ export REASONING_PARSER MASTER_ADDR RAY_PORT
 
 PYTHONPATH_VALUE="${PYTHONPATH_VALUE:-}"
 GENERATOR_ENTRYPOINT="/workspace/scripts/generate_chatml.py"
+RAY_SERVE_ENTRYPOINT="/workspace/scripts/launch_vllm_serve_with_ray.py"
 if [[ "${STAGE_WORKSPACE}" != "0" ]]; then
 	rm -rf "${STAGE_ROOT}"
 	mkdir -p "${STAGE_ROOT}"
 	tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md TLTR.md Agents.md | tar -xz -C "${STAGE_ROOT}"
 	PYTHONPATH_VALUE="${STAGE_ROOT}/src"
 	GENERATOR_ENTRYPOINT="${STAGE_ROOT}/scripts/generate_chatml.py"
+	RAY_SERVE_ENTRYPOINT="${STAGE_ROOT}/scripts/launch_vllm_serve_with_ray.py"
 	echo "Staged workspace into ${STAGE_ROOT}" >&2
 fi
-export GENERATOR_ENTRYPOINT
+export GENERATOR_ENTRYPOINT RAY_SERVE_ENTRYPOINT
 
 echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 echo "Using MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}" >&2
@@ -223,42 +225,22 @@ PY
 		exit 1
 	fi
 
-	RAY_ADDRESS="auto" /opt/gsdg-venv/bin/python - <<'PY' >"$SERVER_LOG" 2>&1 &
-import os
-import ray
-import sys
-
-ray.init(address=os.environ.get("RAY_ADDRESS", "auto"), logging_level="ERROR")
-
-args = [
-    "vllm",
-    "serve",
-    os.environ["MODEL_NAME"],
-    "--distributed-executor-backend",
-    "ray",
-    "--tensor-parallel-size",
-    os.environ["TENSOR_PARALLEL_SIZE"],
-    "--pipeline-parallel-size",
-    os.environ["PIPELINE_PARALLEL_SIZE"],
-    "--dtype",
-    "bfloat16",
-    "--max-model-len",
-    os.environ["MAX_MODEL_LEN"],
-    "--language-model-only",
-    "--host",
-    "0.0.0.0",
-    "--port",
-    "8000",
-]
-
-reasoning_parser = os.environ.get("REASONING_PARSER", "")
-if reasoning_parser:
-    args.extend(["--reasoning-parser", reasoning_parser])
-
-sys.argv = args
-from vllm.entrypoints.cli.main import main
-main()
-PY
+	ray_serve_args=(
+		/opt/gsdg-venv/bin/python "$RAY_SERVE_ENTRYPOINT"
+		--model "$MODEL_NAME"
+		--ray-address auto
+		--host 0.0.0.0
+		--port 8000
+		--tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
+		--pipeline-parallel-size "$PIPELINE_PARALLEL_SIZE"
+		--dtype bfloat16
+		--max-model-len "$MAX_MODEL_LEN"
+		--language-model-only
+	)
+	if [[ -n "${REASONING_PARSER}" ]]; then
+		ray_serve_args+=(--reasoning-parser "$REASONING_PARSER")
+	fi
+	RAY_ADDRESS="auto" "${ray_serve_args[@]}" >"$SERVER_LOG" 2>&1 &
 	server_pid=$!
 
 	health_url="${API_BASE%/v1}/health"
