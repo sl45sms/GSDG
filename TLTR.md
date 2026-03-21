@@ -85,3 +85,7 @@ export DATASET_NAME=glossAPI/Sxolika_vivlia
 export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b_bf16.jsonl
 sbatch --nodes=4 scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
 ```
+
+### Notes:
+  - view the log with `tail -f /iopsstor/scratch/cscs/${USER}/vllm-397b-node0.log` (or `node1.log` for the second node) to confirm the expected checkpoint is being loaded and to monitor GPU memory usage during startup.
+  
