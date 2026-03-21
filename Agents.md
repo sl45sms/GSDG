@@ -74,7 +74,9 @@ Practical split for this repo:
 	- On Clariden, the **bf16** checkpoint `Qwen/Qwen3.5-397B-A17B` is now a **known OOM on 2 nodes / 8 GPUs** during vLLM `profile_run`, even with `--language-model-only` and `--max-model-len 8192`.
 	- Recommended starting point on Clariden: **2 nodes / 8 GPUs total** with `tensor_parallel_size=8`, `pipeline_parallel_size=1`, **Ray**, and the **FP8** checkpoint.
 	- If you must run the **bf16** checkpoint on Clariden, start from **4 nodes / 16 GPUs total**. In this repo, the intended fallback shape is `tensor_parallel_size=8` and `pipeline_parallel_size=2`.
-	- Keep the Clariden-specific container/EDF settings: **aarch64 image**, `qwen3-clariden`, CXI hook disabled, and `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` pinned to `nmn0`.
+	- The current Clariden image includes **FlashInfer 0.6.4** and the matching cubin package; the launcher still installs a worker-wide Python startup fallback before Ray starts so older images can force native GDN prefill when `flashinfer` is absent.
+	- Keep the Clariden-specific container/EDF settings: **aarch64 image**, `qwen3-clariden`, CXI hook disabled, `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` pinned to `nmn0`, and `FI_PROVIDER=cxi` with `NCCL_CROSS_NIC=1`.
+	- On the 2-node Clariden FP8 path, vLLM logs a warning that `tensor_parallel_size=8` is larger than the 4 GPUs reserved on a single node. That warning is **expected** because tensor-parallel workers are intentionally spread across both nodes; it is a performance warning, not the failure itself.
 - The convenience wrappers in the repo root are intentionally for the **32B single-node Clariden workflow**:
 	- `smoke_test_32b.sh`
 	- `prefetch_32b.sh`
@@ -340,12 +342,13 @@ What needs to be true for the 397B run on Clariden:
 	- `NCCL_SOCKET_IFNAME=nmn0`
 	- `GLOO_SOCKET_IFNAME=nmn0`
 	- `VLLM_HOST_IP` set per rank/node
-- Use a **multi-node vLLM launch**. This repo now provides [scripts/run_gsdg_qwen3_397b_clariden_multinode.sh](/users/p-skarvelis/GSDG/scripts/run_gsdg_qwen3_397b_clariden_multinode.sh), which currently exercises the 2-node layout correctly but is still blocked on the current image by a vLLM multi-node `mp` startup failure. Rebuild the Clariden image from `Containerfile.clariden` before the next 397B attempt so Ray is available in the runtime image.
+- Use a **multi-node vLLM launch**. This repo provides [scripts/run_gsdg_qwen3_397b_clariden_multinode.sh](/users/p-skarvelis/GSDG/scripts/run_gsdg_qwen3_397b_clariden_multinode.sh), which exercises the 2-node Ray-backed layout. Point `qwen3-clariden` at the FlashInfer-enabled image `${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh`.
 
 Current runtime status on Clariden:
 
 - The old multi-node `mp` path is no longer the main blocker; Ray is now installed in the Clariden image and the launcher uses `--distributed-executor-backend ray`.
 - With `VLLM_ALLREDUCE_USE_SYMM_MEM=0`, the Ray-backed launch gets past cluster formation and into checkpoint loading.
+- With `VLLM_ALLREDUCE_USE_SYMM_MEM=0`, the FlashInfer-enabled Clariden image gets past cluster formation and into model load on the Ray-backed path. The launcher still keeps the native GDN fallback patch for compatibility with older images that do not include `flashinfer`.
 - The remaining validated limit is memory: the **bf16** checkpoint still exhausts `8 x GH200 95 GB` during model/profile initialization, so the current repo default is to run the **FP8** checkpoint for the 2-node Clariden path.
 
 Minimal Slurm resource shape (starting point):

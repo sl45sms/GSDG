@@ -89,7 +89,7 @@ Build and import the Clariden image using the Clariden Containerfile and a diffe
 ```bash
 CONTAINERFILE=Containerfile.clariden \
 IMAGE_TAG=gsdg-qwen3-clariden:latest \
-SQSH_PATH=${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh \
+SQSH_PATH=${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh \
 ./scripts/build_container_on_alps.sh
 ```
 
@@ -97,11 +97,11 @@ Alternative (Clariden-native build): this repo also provides `scripts/build_clar
 
 If you see Pyxis/Enroot fail very early with messages like "Failed to refresh the dynamic linker cache" on Clariden, it is usually a sign that an x86_64 image is being started on an aarch64 node.
 
-This creates the SquashFS image at the `SQSH_PATH` you set (for Clariden, typically `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh`).
+This creates the SquashFS image at the `SQSH_PATH` you set (for Clariden, typically `${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh`).
 
-For Clariden you should use the Clariden output path `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh` and the corresponding EDF template `edf/qwen3_clariden.toml.example`.
+For Clariden you should use the Clariden output path `${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh` and the corresponding EDF template `edf/qwen3_clariden.toml.example`.
 
-For Clariden, the image recipe in this repo builds vLLM `v0.17.1`, installs Transformers from `main`, and now includes Ray for the multi-node 397B path.
+For Clariden, the image recipe in this repo builds vLLM `v0.17.1`, installs Transformers from `main`, and includes both Ray and FlashInfer `0.6.4` for the multi-node 397B path.
 
 If `~/.config/containers/storage.conf` does not exist yet, the helper script creates one that points Podman storage at `/dev/shm/$USER`. This avoids rootless overlay failures on home-backed network filesystems.
 
@@ -204,6 +204,7 @@ Current 397B Clariden status:
 - The launcher now uses a Ray-backed multi-node path instead of the older failing `mp` path.
 - On Clariden, the bf16 checkpoint `Qwen/Qwen3.5-397B-A17B` is a known OOM on `2 nodes / 8 GPUs` during vLLM startup.
 - The current default is the official FP8 checkpoint `Qwen/Qwen3.5-397B-A17B-FP8` on `2 nodes / 8 GPUs` with `tensor_parallel_size=8`, `pipeline_parallel_size=1`.
+- The current Clariden image includes `flashinfer==0.6.4` and `flashinfer-cubin==0.6.4`; the launcher still keeps a defensive worker-side native GDN fallback for older images where `flashinfer` is missing.
 - If you must run the bf16 checkpoint on Clariden, start from `4 nodes / 16 GPUs` with `TENSOR_PARALLEL_SIZE=8` and `PIPELINE_PARALLEL_SIZE=2`.
 
 

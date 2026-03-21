@@ -71,6 +71,8 @@ nodes with 4 GPUs per node, configured as `tensor_parallel_size=8` and
 Current status:
 
 - The launcher uses a Ray-backed multi-node path.
+- The current Clariden image includes `flashinfer==0.6.4`; the launcher still keeps a worker-wide Python startup fallback so older images can force Qwen3.5 onto the native GDN prefill path if `flashinfer` is missing.
+- The warning about `tensor_parallel_size=8` being larger than the 4 GPUs reserved on each Clariden node is expected on the 2-node FP8 path. It means tensor parallelism is spanning nodes, which is the intended layout here.
 - The bf16 checkpoint `Qwen/Qwen3.5-397B-A17B` is a known OOM on Clariden at
 	`2 nodes / 8 GPUs` during vLLM startup.
 - If you need the bf16 checkpoint, request `4 nodes / 16 GPUs` and submit with:
