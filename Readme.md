@@ -28,6 +28,7 @@ The recommended operating model is:
 - `scripts/build_container_on_alps.sh`: build and import the CE image on Alps.
 - `scripts/prefetch_hf_assets.sh`: Slurm job to warm model and dataset caches in `${SCRATCH}`.
 - `scripts/run_gsdg_qwen3.sh`: single-job Slurm example.
+- `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher for `Qwen/Qwen3.5-397B-A17B`.
 - `smoke_test_32b.sh`: convenience wrapper for a 32B vLLM smoke test on Clariden.
 - `prefetch_32b.sh`: convenience wrapper to prefetch `Qwen/Qwen3-32B` weights.
 - `prefetch_datasets.sh`: convenience wrapper to prefetch one or more datasets.
@@ -195,6 +196,7 @@ See `Agents.md` for the full Bristen runbook and cluster-specific operational gu
 
 1. Build/import the Clariden image (see above).
 2. Copy `edf/qwen3_clariden.toml.example` to `~/.edf/qwen3-clariden.toml` and adjust the `image = ...` path if needed.
-3. Submit the same Slurm scripts; they will default to `qwen3-clariden` automatically on Clariden.
+3. For the validated 32B path, use the existing single-node wrappers.
+4. For `Qwen/Qwen3.5-397B-A17B`, submit `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh` on a 2-node Clariden allocation shape.
 
 

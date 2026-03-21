@@ -53,3 +53,16 @@ End-to-end run for `glossAPI/Sxolika_vivlia` + `Qwen/Qwen3-32B`:
 By default the Slurm scripts stage the current repo into `$SCRATCH` and set
 `PYTHONPATH` inside the container, so small Python changes take effect without
 rebuilding the `.sqsh`.
+
+## 6) Full run for 397B on Clariden (2 nodes)
+
+For `Qwen/Qwen3.5-397B-A17B`, use the dedicated multi-node launcher:
+
+```bash
+export DATASET_NAME=glossAPI/Sxolika_vivlia
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b.jsonl
+sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
+This launcher uses 2 Clariden nodes with 4 GPUs per node, configured as
+`tensor_parallel_size=4` and `pipeline_parallel_size=2`.
