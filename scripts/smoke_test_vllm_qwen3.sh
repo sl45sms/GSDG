@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+STAGE_WORKSPACE="${STAGE_WORKSPACE:-1}"
+STAGE_ROOT="${STAGE_ROOT:-${SCRATCH}/gsdg_workspace_${SLURM_JOB_ID}}"
+
 CE_ENVIRONMENT="${CE_ENVIRONMENT:-}"
 if [[ -z "${CE_ENVIRONMENT}" ]]; then
 	cluster_hint="${SLURM_CLUSTER_NAME:-${SLURM_SUBMIT_HOST:-}}"
@@ -76,10 +79,28 @@ echo "Using VLLM_HOST_IP=${VLLM_HOST_IP}" >&2
 
 echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 
+PYTHONPATH_VALUE="${PYTHONPATH_VALUE:-}"
+if [[ "${STAGE_WORKSPACE}" != "0" ]]; then
+	rm -rf "${STAGE_ROOT}"
+	mkdir -p "${STAGE_ROOT}"
+	tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md TLTR.md Agents.md | tar -xz -C "${STAGE_ROOT}"
+	PYTHONPATH_VALUE="${STAGE_ROOT}/src"
+	echo "Staged workspace into ${STAGE_ROOT}" >&2
+elif [[ -n "${PYTHONPATH_VALUE}" ]]; then
+	echo "Using PYTHONPATH_VALUE=${PYTHONPATH_VALUE}" >&2
+fi
+
+SRUN_EXPORT="ALL"
+if [[ -n "${PYTHONPATH_VALUE}" ]]; then
+	SRUN_EXPORT+=",PYTHONPATH=${PYTHONPATH_VALUE}"
+fi
+
 # Run server + health + one request inside a single Slurm step.
 # Running the server in a background `srun` and then starting another `srun`
 # often fails on Clariden with: "step creation temporarily disabled".
-srun --environment="${CE_ENVIRONMENT}" --ntasks=1 bash -lc '
+srun --environment="${CE_ENVIRONMENT}" \
+	--export="${SRUN_EXPORT}" \
+	--ntasks=1 bash -lc '
 	set -euo pipefail
 	. /opt/gsdg-venv/bin/activate
 
