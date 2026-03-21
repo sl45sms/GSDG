@@ -24,5 +24,5 @@ OCI_ANNOTATION_com__hooks__cxi__enabled = "false"
 # Clariden-safe defaults for vLLM distributed startup.
 NCCL_SOCKET_IFNAME = "nmn0"
 GLOO_SOCKET_IFNAME = "nmn0"
-VLLM_HOST_IP = "${VLLM_HOST_IP}"
+VLLM_HOST_IP = "${VLLM_HOST_IP:-}"
 VLLM_ENABLE_V1_MULTIPROCESSING = "0"
