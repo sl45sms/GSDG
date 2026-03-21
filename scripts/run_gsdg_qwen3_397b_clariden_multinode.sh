@@ -35,6 +35,7 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B}"
 MAX_ROWS="${MAX_ROWS:-}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MASTER_PORT="${MASTER_PORT:-29501}"
+RAY_PORT="${RAY_PORT:-6379}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
 PIPELINE_PARALLEL_SIZE="${PIPELINE_PARALLEL_SIZE:-1}"
 REASONING_PARSER="${REASONING_PARSER:-}"
@@ -66,7 +67,7 @@ fi
 
 export DATASET_NAME DATASET_SPLIT OUTPUT_PATH API_BASE MODEL_NAME MAX_ROWS
 export MAX_MODEL_LEN MASTER_PORT TENSOR_PARALLEL_SIZE PIPELINE_PARALLEL_SIZE
-export REASONING_PARSER MASTER_ADDR
+export REASONING_PARSER MASTER_ADDR RAY_PORT
 
 PYTHONPATH_VALUE="${PYTHONPATH_VALUE:-}"
 GENERATOR_ENTRYPOINT="/workspace/scripts/generate_chatml.py"
@@ -88,7 +89,7 @@ SRUN_EXPORT="ALL"
 if [[ -n "${PYTHONPATH_VALUE}" ]]; then
 	SRUN_EXPORT+=",PYTHONPATH=${PYTHONPATH_VALUE}"
 fi
-SRUN_EXPORT+=",MASTER_ADDR=${MASTER_ADDR},MASTER_PORT=${MASTER_PORT},GENERATOR_ENTRYPOINT=${GENERATOR_ENTRYPOINT},VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}"
+SRUN_EXPORT+=",MASTER_ADDR=${MASTER_ADDR},MASTER_PORT=${MASTER_PORT},RAY_PORT=${RAY_PORT},GENERATOR_ENTRYPOINT=${GENERATOR_ENTRYPOINT},VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}"
 
 srun --environment="${CE_ENVIRONMENT}" \
 	--export="${SRUN_EXPORT}" \
@@ -165,36 +166,100 @@ echo "Node ${SLURM_NODEID}: VLLM_HOST_IP=${VLLM_HOST_IP}" >&2
 echo "Node ${SLURM_NODEID}: VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}" >&2
 
 SERVER_LOG="${PWD}/vllm-397b-node${SLURM_NODEID}.log"
-common_args=(
-	serve "$MODEL_NAME"
-	--distributed-executor-backend mp
-	--tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
-	--pipeline-parallel-size "$PIPELINE_PARALLEL_SIZE"
-	--nnodes "$SLURM_NNODES"
-	--node-rank "$SLURM_NODEID"
-	--master-addr "$MASTER_ADDR"
-	--master-port "$MASTER_PORT"
-	--dtype bfloat16
-	--max-model-len "$MAX_MODEL_LEN"
-	--language-model-only
-)
-if [[ -n "${REASONING_PARSER:-}" ]]; then
-	common_args+=(--reasoning-parser "$REASONING_PARSER")
-fi
+RAY_LOG="${PWD}/ray-397b-node${SLURM_NODEID}.log"
+RAY_HEAD_IP_FILE="${SCRATCH}/ray-head-ip-${SLURM_JOB_ID}.txt"
+RAY_STOP_FILE="${SCRATCH}/ray-stop-${SLURM_JOB_ID}.flag"
+
+cleanup() {
+	touch "$RAY_STOP_FILE" || true
+	if [[ -n "${server_pid:-}" ]] && kill -0 "$server_pid" >/dev/null 2>&1; then
+		kill "$server_pid" >/dev/null 2>&1 || true
+		wait "$server_pid" >/dev/null 2>&1 || true
+	fi
+	ray stop -f >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+wait_for_file() {
+	local path="$1"
+	local timeout_secs="$2"
+	local elapsed=0
+	while [[ ! -f "$path" ]]; do
+		if (( elapsed >= timeout_secs )); then
+			return 1
+		fi
+		sleep 2
+		elapsed=$((elapsed + 2))
+	done
+	return 0
+}
 
 if [[ "${SLURM_NODEID}" == "0" ]]; then
-	/opt/gsdg-venv/bin/vllm "${common_args[@]}" \
-		--host 0.0.0.0 \
-		--port 8000 >"$SERVER_LOG" 2>&1 &
-	server_pid=$!
+	rm -f "$RAY_HEAD_IP_FILE" "$RAY_STOP_FILE"
+	echo "$VLLM_HOST_IP" >"$RAY_HEAD_IP_FILE"
+	ray stop -f >/dev/null 2>&1 || true
+	ray start --head --node-ip-address "$VLLM_HOST_IP" --port "$RAY_PORT" >"$RAY_LOG" 2>&1
 
-	cleanup() {
-		if kill -0 "$server_pid" >/dev/null 2>&1; then
-			kill "$server_pid" || true
-			wait "$server_pid" || true
+	for _ in $(seq 1 120); do
+		active_nodes="$(/opt/gsdg-venv/bin/python - <<'PY'
+import ray
+try:
+    ray.init(address="auto", logging_level="ERROR")
+    print(sum(1 for node in ray.nodes() if node.get("Alive")))
+finally:
+    if ray.is_initialized():
+        ray.shutdown()
+PY
+		)"
+		if [[ "$active_nodes" == "$SLURM_NNODES" ]]; then
+			break
 		fi
-	}
-	trap cleanup EXIT
+		sleep 5
+	done
+
+	if [[ "$active_nodes" != "$SLURM_NNODES" ]]; then
+		echo "Ray cluster did not reach ${SLURM_NNODES} node(s)" >&2
+		cat "$RAY_LOG" >&2 || true
+		exit 1
+	fi
+
+	RAY_ADDRESS="auto" /opt/gsdg-venv/bin/python - <<'PY' >"$SERVER_LOG" 2>&1 &
+import os
+import ray
+import sys
+
+ray.init(address=os.environ.get("RAY_ADDRESS", "auto"), logging_level="ERROR")
+
+args = [
+    "vllm",
+    "serve",
+    os.environ["MODEL_NAME"],
+    "--distributed-executor-backend",
+    "ray",
+    "--tensor-parallel-size",
+    os.environ["TENSOR_PARALLEL_SIZE"],
+    "--pipeline-parallel-size",
+    os.environ["PIPELINE_PARALLEL_SIZE"],
+    "--dtype",
+    "bfloat16",
+    "--max-model-len",
+    os.environ["MAX_MODEL_LEN"],
+    "--language-model-only",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "8000",
+]
+
+reasoning_parser = os.environ.get("REASONING_PARSER", "")
+if reasoning_parser:
+    args.extend(["--reasoning-parser", reasoning_parser])
+
+sys.argv = args
+from vllm.entrypoints.cli.main import main
+main()
+PY
+	server_pid=$!
 
 	health_url="${API_BASE%/v1}/health"
 	for _ in $(seq 1 720); do
@@ -225,6 +290,15 @@ if [[ "${SLURM_NODEID}" == "0" ]]; then
 	"${generator_args[@]}"
 	echo "Server log: $SERVER_LOG" >&2
 else
-	exec /opt/gsdg-venv/bin/vllm "${common_args[@]}" --headless >"$SERVER_LOG" 2>&1
+	if ! wait_for_file "$RAY_HEAD_IP_FILE" 120; then
+		echo "Timed out waiting for Ray head IP file" >&2
+		exit 1
+	fi
+	RAY_HEAD_IP="$(cat "$RAY_HEAD_IP_FILE")"
+	ray stop -f >/dev/null 2>&1 || true
+	ray start --address "${RAY_HEAD_IP}:${RAY_PORT}" --node-ip-address "$VLLM_HOST_IP" >"$RAY_LOG" 2>&1
+	while [[ ! -f "$RAY_STOP_FILE" ]]; do
+		sleep 5
+	done
 fi
 INNER
