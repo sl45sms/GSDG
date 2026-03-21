@@ -29,6 +29,7 @@ fi
 # serving, so disable the hook.
 if [[ "${CE_ENVIRONMENT}" == "qwen3-clariden" ]]; then
 	export OCI_ANNOTATION_com__hooks__cxi__enabled=false
+	export SLURM_NETWORK=disable_rdzv_get
 fi
 
 DATASET_NAME="${DATASET_NAME:?Set DATASET_NAME to a glossAPI dataset name}"
@@ -38,6 +39,7 @@ API_BASE="${API_BASE:-http://localhost:8000/v1}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B}"
 MAX_ROWS="${MAX_ROWS:-}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-4}"
+REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 
 detect_vllm_host_ip() {
 	local interface_name
@@ -64,14 +66,22 @@ echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 echo "Using VLLM_HOST_IP=${VLLM_HOST_IP}" >&2
 
 srun --environment="${CE_ENVIRONMENT}" --ntasks=1 \
-	vllm serve "${MODEL_NAME}" \
-	--host 0.0.0.0 \
-	--port 8000 \
-	--tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
-	--dtype bfloat16 \
-	--max-model-len 32768 \
-	--reasoning-parser qwen3 \
-	--language-model-only &
+	bash -lc '
+		set -euo pipefail
+		. /opt/gsdg-venv/bin/activate
+		args=(serve "$MODEL_NAME" \
+			--host 0.0.0.0 \
+			--port 8000 \
+			--tensor-parallel-size "'"${TENSOR_PARALLEL_SIZE}"'" \
+			--dtype bfloat16 \
+			--max-model-len 32768 \
+			--language-model-only)
+		if [[ -n "${REASONING_PARSER:-}" ]]; then
+			args+=(--reasoning-parser "${REASONING_PARSER}")
+		fi
+		exec /opt/gsdg-venv/bin/vllm "${args[@]}"
+	' \
+	> vllm-server.log 2>&1 &
 
 until curl -sf http://localhost:8000/health >/dev/null; do
 	sleep 2
