@@ -98,6 +98,9 @@ tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md | \
     cbor2 blake3 cachetools cloudpickle diskcache msgspec pybase64 setproctitle ijson \
     "gguf>=0.17.0" "compressed-tensors==0.13.0" "depyf==0.20.0"
 
+  # Required for a Ray-backed multi-node vLLM path on Clariden.
+  python -m pip install "ray[default]"
+
   # Required by the OpenAI-compatible entrypoint.
   python -m pip install "openai>=1.99.1,<2.25.0" "openai-harmony>=0.0.3" mistral-common
 

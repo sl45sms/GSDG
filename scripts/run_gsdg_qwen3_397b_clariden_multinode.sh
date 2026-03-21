@@ -21,9 +21,10 @@ fi
 
 export OCI_ANNOTATION_com__hooks__cxi__enabled=false
 export SLURM_NETWORK=disable_rdzv_get
+unset VLLM_NNODES || true
 VLLM_HOST_IP="${VLLM_HOST_IP:-}"
 export VLLM_HOST_IP
-VLLM_ENABLE_V1_MULTIPROCESSING="1"
+VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING:-1}"
 export VLLM_ENABLE_V1_MULTIPROCESSING
 
 DATASET_NAME="${DATASET_NAME:?Set DATASET_NAME to a glossAPI dataset name}"
@@ -96,7 +97,8 @@ set -euo pipefail
 
 . /opt/gsdg-venv/bin/activate
 
-export VLLM_ENABLE_V1_MULTIPROCESSING="1"
+unset VLLM_NNODES || true
+export VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING}"
 
 detect_vllm_host_ip() {
 	local route_target interface_name detected_ip
@@ -168,7 +170,7 @@ common_args=(
 	--distributed-executor-backend mp
 	--tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
 	--pipeline-parallel-size "$PIPELINE_PARALLEL_SIZE"
-	--nnodes "$PIPELINE_PARALLEL_SIZE"
+	--nnodes "$SLURM_NNODES"
 	--node-rank "$SLURM_NODEID"
 	--master-addr "$MASTER_ADDR"
 	--master-port "$MASTER_PORT"

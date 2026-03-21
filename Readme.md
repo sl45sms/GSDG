@@ -101,7 +101,7 @@ This creates the SquashFS image at the `SQSH_PATH` you set (for Clariden, typica
 
 For Clariden you should use the Clariden output path `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh` and the corresponding EDF template `edf/qwen3_clariden.toml.example`.
 
-For Clariden, the working image in this repo builds vLLM `v0.17.1` and installs a compatible `transformers` version by default. If you need bleeding-edge Qwen3.5 support, you may need to install Transformers from `main` and/or use a newer vLLM.
+For Clariden, the image recipe in this repo builds vLLM `v0.17.1`, installs Transformers from `main`, and now includes Ray so the next Clariden image rebuild can support a Ray-backed multi-node 397B path.
 
 If `~/.config/containers/storage.conf` does not exist yet, the helper script creates one that points Podman storage at `/dev/shm/$USER`. This avoids rootless overlay failures on home-backed network filesystems.
 
@@ -197,6 +197,12 @@ See `Agents.md` for the full Bristen runbook and cluster-specific operational gu
 1. Build/import the Clariden image (see above).
 2. Copy `edf/qwen3_clariden.toml.example` to `~/.edf/qwen3-clariden.toml` and adjust the `image = ...` path if needed.
 3. For the validated 32B path, use the existing single-node wrappers.
-4. For `Qwen/Qwen3.5-397B-A17B`, submit `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh` on a 2-node Clariden allocation shape.
+4. For `Qwen/Qwen3.5-397B-A17B`, rebuild the Clariden image from `Containerfile.clariden`, then continue the multi-node validation effort from `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh` on a 2-node Clariden allocation shape.
+
+Current 397B Clariden status:
+
+- The launcher is now wired correctly for `2 nodes x 4 GPUs`, `tensor_parallel_size=8`, `pipeline_parallel_size=1`.
+- The currently built Clariden image still fails in vLLM multi-node `mp` worker startup with `inner dp world group is not initialized`.
+- The next required step is a fresh Clariden image rebuild so Ray is available in the runtime image before continuing multi-node 397B validation.
 
 
