@@ -47,6 +47,28 @@ tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md | \
   set -euo pipefail
   set -x
 
+  install_flashinfer() {
+    if python -c "import flashinfer" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    if python -m pip install "flashinfer-python==0.6.4" "flashinfer-cubin==0.6.4"; then
+      return 0
+    fi
+
+    rm -rf /tmp/flashinfer-src
+    python -m pip install --upgrade "setuptools>=77" build
+    git clone --recursive --branch v0.6.4 https://github.com/flashinfer-ai/flashinfer.git /tmp/flashinfer-src
+    export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-9.0a}"
+    (
+      cd /tmp/flashinfer-src
+      python -m pip install -v .
+      cd flashinfer-cubin
+      python -m build --no-isolation --wheel
+      python -m pip install dist/*.whl
+    )
+  }
+
   # Quick connectivity diagnostics (many compute nodes restrict outbound access)
   command -v curl >/dev/null 2>&1 || true
   curl -I -sSf https://pypi.org/simple/ >/dev/null 2>&1 || echo "WARN: cannot reach pypi.org"
@@ -98,6 +120,12 @@ tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md | \
     cbor2 blake3 cachetools cloudpickle diskcache msgspec pybase64 setproctitle ijson \
     "gguf>=0.17.0" "compressed-tensors==0.13.0" "depyf==0.20.0"
 
+  # Required for a Ray-backed multi-node vLLM path on Clariden.
+  python -m pip install "ray[default]"
+
+  # Qwen3.5 GDN prefill on GH200 currently requires FlashInfer in this vLLM build.
+  install_flashinfer
+
   # Required by the OpenAI-compatible entrypoint.
   python -m pip install "openai>=1.99.1,<2.25.0" "openai-harmony>=0.0.3" mistral-common
 
@@ -113,6 +141,8 @@ tar -C /users/p-skarvelis/GSDG -cz requirements.txt src scripts Readme.md | \
     "outlines_core==0.2.11"
 
   python -c "import vllm; print(\"vllm_version=\" + vllm.__version__)"
+  python -c "import flashinfer; print(\"flashinfer_version=\" + flashinfer.__version__)"
+  python -m flashinfer show-config
 '
 
 ROOTFS=""

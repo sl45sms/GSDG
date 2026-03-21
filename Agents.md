@@ -8,8 +8,8 @@ This repository is designed to run on CSCS Alps, on **Bristen** (A100 / x86_64) 
 
 The end goal is:
 
-1. Build (or pull) a container image that can run **Qwen/Qwen3.5-397B-A17B**.
-2. Run the model once (as a server) under Slurm on Bristen.
+1. Build (or pull) a container image that can run **Qwen/Qwen3-32B** and **Qwen/Qwen3.5-397B-A17B**.
+2. Run either model under Slurm on Bristen or Clariden, with the right resource shape for that model.
 3. Stream rows from the **GlossAPI** HuggingFace datasets, extract the “best” text field(s), and generate **Greek** synthetic (question, answer) pairs.
 4. Write output in **ChatML**-style JSONL.
 
@@ -50,12 +50,14 @@ srun -Aa0140 --environment=test echo "Its Alive"
 
 ---
 
-## 1) Strategy for running Qwen3.5-397B-A17B on Bristen
+## 1) Model and cluster strategy
 
-Qwen3.5-397B-A17B is a very large multimodal MoE model (397B total / 17B active). For practical inference on Bristen A100 nodes, the usual pattern is:
+Qwen3.5-397B-A17B is a very large multimodal MoE model (397B total / 17B active). For practical inference, the usual pattern is:
 
 - Run an inference server (recommended: **vLLM** or **SGLang**).
-- Use tensor parallelism (e.g. **8 GPUs** on a single node).
+- Use tensor parallelism across **8 GPUs total**.
+	- On clusters with 8 GPUs per node, that can be a single node.
+	- On **Clariden**, which has **4 GPUs per node**, that means **at least 2 nodes** for an 8-way tensor-parallel starting point.
 - For this repo, run the model in **text-only** mode and call the server locally (`http://localhost:8000/v1`).
 
 The model card notes:
@@ -63,6 +65,25 @@ The model card notes:
 - Use the **latest Transformers main branch** for native Qwen3.5 support.
 - Use **vLLM main/nightly**, not an older released build.
 - Qwen3.5 does **not** use the old `/no_think` prompt switch; disable thinking via `chat_template_kwargs.enable_thinking=False` on the API request when you want strict JSON output.
+
+Practical split for this repo:
+
+- **Qwen/Qwen3-32B on Clariden**: validated **single-node** path on **1 GH200 node / 4 GPUs** with `tensor_parallel_size=4`.
+- **Qwen/Qwen3.5-397B-A17B on Clariden**: requires a **multi-node** run because Clariden nodes expose only **4 GPUs per node**.
+	- The dedicated Clariden launcher now uses a **Ray-backed** multi-node serve path and defaults to the official **FP8 checkpoint** `Qwen/Qwen3.5-397B-A17B-FP8`.
+	- On Clariden, the **bf16** checkpoint `Qwen/Qwen3.5-397B-A17B` is now a **known OOM on 2 nodes / 8 GPUs** during vLLM `profile_run`, even with `--language-model-only` and `--max-model-len 8192`.
+	- Recommended starting point on Clariden: **2 nodes / 8 GPUs total** with `tensor_parallel_size=8`, `pipeline_parallel_size=1`, **Ray**, and the **FP8** checkpoint.
+	- If you must run the **bf16** checkpoint on Clariden, start from **4 nodes / 16 GPUs total**. In this repo, the intended fallback shape is `tensor_parallel_size=8` and `pipeline_parallel_size=2`.
+	- The current Clariden image includes **FlashInfer 0.6.4** and the matching cubin package; the launcher still installs a worker-wide Python startup fallback before Ray starts so older images can force native GDN prefill when `flashinfer` is absent.
+	- Keep the Clariden-specific container/EDF settings: **aarch64 image**, `qwen3-clariden`, CXI hook disabled, `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` pinned to `nmn0`, and `FI_PROVIDER=cxi` with `NCCL_CROSS_NIC=1`.
+	- On the 2-node Clariden FP8 path, vLLM logs a warning that `tensor_parallel_size=8` is larger than the 4 GPUs reserved on a single node. That warning is **expected** because tensor-parallel workers are intentionally spread across both nodes; it is a performance warning, not the failure itself.
+- The convenience wrappers in the repo root are intentionally for the **32B single-node Clariden workflow**:
+	- `smoke_test_32b.sh`
+	- `prefetch_32b.sh`
+	- `run_single_dataset_32b.sh`
+- The generic Slurm scripts in `scripts/` currently use a **single-node** shape by default (`--nodes=1`, `--gpus-per-node=4`, `TENSOR_PARALLEL_SIZE=4`). That matches the 32B Clariden workflow and smoke tests, but it is **not** a turnkey 397B-on-Clariden launcher.
+
+### 1a) Bristen status
 
 Verified on this Bristen `normal` partition on 2026-03-20:
 
@@ -92,6 +113,8 @@ Convenience wrappers (repo root):
 - `prefetch_32b.sh`: prefetches the `Qwen/Qwen3-32B` weights.
 - `prefetch_datasets.sh`: prefetches one or more datasets (safe with comma-separated lists).
 - `run_single_dataset_32b.sh`: full run for `glossAPI/Sxolika_vivlia` + `Qwen/Qwen3-32B`.
+
+These wrappers are the recommended path when you want the currently validated **single-node Clariden** setup. For **Qwen/Qwen3.5-397B-A17B** on Clariden, keep using the same Clariden image and EDF, but switch to a **multi-node** Slurm allocation.
 
 ---
 
@@ -281,13 +304,110 @@ If a combined model+dataset prefetch appears stuck, split the problem first: run
 
 ---
 
-## 6) Run Qwen3 with vLLM on Bristen
+## 6) Run Qwen3 with vLLM
 
-### 6.1 Single-node, 8-GPU serving (recommended starting point)
+### 6.1 Clariden: single-node 32B workflow
+
+This is the validated path in this repository today:
+
+- **Model**: `Qwen/Qwen3-32B`
+- **Cluster**: Clariden
+- **Resources**: `1 node`, `4 GPUs`, `tensor_parallel_size=4`
+- **Runtime**: `qwen3-clariden` CE environment with the Clariden aarch64 image
+
+Use the existing convenience wrappers:
+
+```bash
+./smoke_test_32b.sh
+./prefetch_32b.sh
+./run_single_dataset_32b.sh
+```
+
+The underlying Slurm scripts already match this shape (`--nodes=1`, `--gpus-per-node=4`) and avoid the Clariden multi-step issue by running server + healthcheck + client work inside a single `srun` step.
+
+### 6.2 Clariden: multi-node 397B workflow
+
+For `Qwen/Qwen3.5-397B-A17B`, a **single Clariden node is not enough** for the 8-GPU tensor-parallel shape suggested by the model card, because each Clariden node has only **4 GPUs**.
+
+What needs to be true for the 397B run on Clariden:
+
+- Use the **Clariden aarch64 image** and `qwen3-clariden` EDF.
+- Prefer the default **FP8** checkpoint `Qwen/Qwen3.5-397B-A17B-FP8` for the current Clariden path.
+- Request **at least 2 nodes** so you have **8 GPUs total**.
+- For the current **FP8** starting point, use `tensor_parallel_size=8` and `pipeline_parallel_size=1` on a 2-node job.
+- For the **bf16** checkpoint, do **not** reuse the 2-node shape: the repo has now observed a reproducible CUDA OOM during vLLM `profile_run` on `2 nodes / 8 GPUs`. Start from **4 nodes / 16 GPUs** with `tensor_parallel_size=8` and `pipeline_parallel_size=2` instead.
+- Keep the Clariden networking/runtime settings:
+	- `OCI_ANNOTATION_com__hooks__cxi__enabled=false`
+	- `SLURM_NETWORK=disable_rdzv_get`
+	- `NCCL_SOCKET_IFNAME=nmn0`
+	- `GLOO_SOCKET_IFNAME=nmn0`
+	- `VLLM_HOST_IP` set per rank/node
+- Use a **multi-node vLLM launch**. This repo provides [scripts/run_gsdg_qwen3_397b_clariden_multinode.sh](/users/p-skarvelis/GSDG/scripts/run_gsdg_qwen3_397b_clariden_multinode.sh), which exercises the 2-node Ray-backed layout. Point `qwen3-clariden` at the FlashInfer-enabled image `${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh`.
+
+Current runtime status on Clariden:
+
+- The old multi-node `mp` path is no longer the main blocker; Ray is now installed in the Clariden image and the launcher uses `--distributed-executor-backend ray`.
+- With `VLLM_ALLREDUCE_USE_SYMM_MEM=0`, the Ray-backed launch gets past cluster formation and into checkpoint loading.
+- With `VLLM_ALLREDUCE_USE_SYMM_MEM=0`, the FlashInfer-enabled Clariden image gets past cluster formation and into model load on the Ray-backed path. The launcher still keeps the native GDN fallback patch for compatibility with older images that do not include `flashinfer`.
+- The remaining validated limit is memory: the **bf16** checkpoint still exhausts `8 x GH200 95 GB` during model/profile initialization, so the current repo default is to run the **FP8** checkpoint for the 2-node Clariden path.
+
+Minimal Slurm resource shape (starting point):
+
+```bash
+#!/bin/bash
+#SBATCH -A a0140
+#SBATCH --job-name=qwen3-397b-clariden
+#SBATCH --partition=normal
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=32
+#SBATCH --time=02:00:00
+
+set -euo pipefail
+
+# End-to-end generation against the multi-node vLLM server:
+export DATASET_NAME=glossAPI/<dataset_name>
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b.jsonl
+sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
+If you want the **bf16** checkpoint instead of the default FP8 one, use a larger fallback shape:
+
+```bash
+#!/bin/bash
+#SBATCH -A a0140
+#SBATCH --job-name=qwen3-397b-clariden-bf16
+#SBATCH --partition=normal
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=32
+#SBATCH --time=04:00:00
+
+set -euo pipefail
+
+export MODEL_NAME=Qwen/Qwen3.5-397B-A17B
+export TENSOR_PARALLEL_SIZE=8
+export PIPELINE_PARALLEL_SIZE=2
+export DATASET_NAME=glossAPI/<dataset_name>
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b_bf16.jsonl
+sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
+Notes about the current repo state:
+
+- `scripts/smoke_test_vllm_qwen3.sh` and `scripts/run_gsdg_qwen3.sh` are still **single-node scripts**.
+- They are appropriate for the **32B Clariden workflow** and for single-node smoke/debug work.
+- For **397B on Clariden**, use [scripts/run_gsdg_qwen3_397b_clariden_multinode.sh](/users/p-skarvelis/GSDG/scripts/run_gsdg_qwen3_397b_clariden_multinode.sh) as the base launcher.
+- The current launcher default is the **FP8** checkpoint on `2 nodes / 8 GPUs` with `tp=8, pp=1`.
+- If you switch that launcher back to the **bf16** checkpoint, do not reuse the 2-node shape; start from `4 nodes / 16 GPUs` with `tp=8, pp=2`.
+
+### 6.3 Bristen: model-card-style 8-GPU launch
 
 Create a Slurm script (example) that:
 
-- Requests 1 node, 8 GPUs
+- Requests 8 GPUs total
 - Starts a local OpenAI-compatible vLLM server
 
 ```bash
@@ -322,11 +442,12 @@ sbatch run_vllm.sh
 
 Notes:
 
+- Treat this as the **model-card-style launch shape**, not a validated Bristen single-node recipe for the current cluster hardware.
 - The model card also shows a vLLM variant with reasoning enabled. If you enable thinking/reasoning, make sure your downstream parsing strips `<think>...</think>`.
 - For synthetic Q/A generation, prefer API-side non-thinking mode by sending `chat_template_kwargs={"enable_thinking": False}` rather than using `/no_think` in the prompt.
 - `--language-model-only` is recommended here because the pipeline consumes text-only GlossAPI rows and does not need the vision stack loaded.
 
-### 6.2 (Optional) Multi-node on Clariden
+### 6.4 Clariden or Bristen: multi-node notes
 
 If you need more memory/throughput than a single node, run multi-node on **Clariden** (https://docs.cscs.ch/clusters/clariden/), which provides **GH200** nodes.
 
@@ -354,7 +475,7 @@ set -euo pipefail
 
 # NOTE: vLLM multi-node launch details vary by vLLM version and backend.
 # Follow vLLM’s official multi-node guidance, then run via CE:
-# srun --environment=qwen3 <vllm multi-node launcher ...>
+# srun --environment=qwen3-clariden <vllm multi-node launcher ...>
 ```
 
 For Clariden, also see the general Slurm guidance for GH200 nodes: https://docs.cscs.ch/running/slurm/#nvidia-gh200-gpu-nodes
@@ -378,7 +499,7 @@ On Clariden, creating multiple Slurm steps in quick succession can fail transien
 
 #### One-job example (server + generator)
 
-This pattern runs everything in one job allocation on a single node:
+This pattern runs everything in one job allocation on a single node. In this repo, that matches the **32B Clariden** workflow, not the **397B multi-node** workflow:
 
 ```bash
 #!/bin/bash
@@ -387,20 +508,20 @@ This pattern runs everything in one job allocation on a single node:
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus-per-node=8
+#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH --time=04:00:00
 
 set -euo pipefail
 
 # In this repo, prefer the provided single-job script (it handles cluster
-# differences and avoids multi-step issues on Clariden):
+# differences and avoids multi-step issues on Clariden for the single-node path):
 export DATASET_NAME=glossAPI/<dataset_name>
 export OUTPUT_PATH=${SCRATCH}/synthetic_chatml.jsonl
 sbatch scripts/run_gsdg_qwen3.sh
 ```
 
-If you prefer two `srun` steps with different resource shapes (e.g. more CPUs for the generator), split them and adjust `--cpus-per-task`.
+If you prefer two `srun` steps with different resource shapes (e.g. more CPUs for the generator), split them and adjust `--cpus-per-task`. For `Qwen/Qwen3.5-397B-A17B` on Clariden, replace this single-node pattern with a dedicated **multi-node** launcher.
 
 ### 7.2 Row → text extraction rule (robust defaults)
 
@@ -508,9 +629,10 @@ VLLM_ENABLE_V1_MULTIPROCESSING = "0"
 ## 10) What “done” looks like
 
 - A `uenv`-based build-time Python workflow exists for local validation on Alps.
-- A CE environment `qwen3` exists and points to a `.sqsh` image in `${SCRATCH}`.
+- CE environments exist for the target cluster: `qwen3` on Bristen and `qwen3-clariden` on Clariden.
 - A prefetch job can populate `${SCRATCH}` caches with model weights and dataset artifacts.
-- A Slurm job can start `vllm serve Qwen/Qwen3.5-397B-A17B` on 8×A100.
+- A Clariden single-node job can run `Qwen/Qwen3-32B` on `1 node / 4 GPUs`.
+- A multi-node job shape is defined for `Qwen/Qwen3.5-397B-A17B` on systems that expose only `4 GPUs per node`, such as Clariden.
 - A generator script can stream GlossAPI rows and write ChatML JSONL with Greek Q/A pairs.
 
 

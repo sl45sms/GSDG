@@ -53,3 +53,39 @@ End-to-end run for `glossAPI/Sxolika_vivlia` + `Qwen/Qwen3-32B`:
 By default the Slurm scripts stage the current repo into `$SCRATCH` and set
 `PYTHONPATH` inside the container, so small Python changes take effect without
 rebuilding the `.sqsh`.
+
+## 6) Full run for 397B on Clariden
+
+For the current default 397B path, use the dedicated multi-node launcher:
+
+```bash
+export DATASET_NAME=glossAPI/Sxolika_vivlia
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b.jsonl
+sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
+This launcher now defaults to `Qwen/Qwen3.5-397B-A17B-FP8` and uses 2 Clariden
+nodes with 4 GPUs per node, configured as `tensor_parallel_size=8` and
+`pipeline_parallel_size=1`.
+
+Current status:
+
+- The launcher uses a Ray-backed multi-node path.
+- The current Clariden image includes `flashinfer==0.6.4`; the launcher still keeps a worker-wide Python startup fallback so older images can force Qwen3.5 onto the native GDN prefill path if `flashinfer` is missing.
+- The warning about `tensor_parallel_size=8` being larger than the 4 GPUs reserved on each Clariden node is expected on the 2-node FP8 path. It means tensor parallelism is spanning nodes, which is the intended layout here.
+- The bf16 checkpoint `Qwen/Qwen3.5-397B-A17B` is a known OOM on Clariden at
+	`2 nodes / 8 GPUs` during vLLM startup.
+- If you need the bf16 checkpoint, request `4 nodes / 16 GPUs` and submit with:
+
+```bash
+export MODEL_NAME=Qwen/Qwen3.5-397B-A17B
+export TENSOR_PARALLEL_SIZE=8
+export PIPELINE_PARALLEL_SIZE=2
+export DATASET_NAME=glossAPI/Sxolika_vivlia
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b_bf16.jsonl
+sbatch --nodes=4 scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
+### Notes:
+  - view the log with `tail -f /iopsstor/scratch/cscs/${USER}/vllm-397b-node0.log` (or `node1.log` for the second node) to confirm the expected checkpoint is being loaded and to monitor GPU memory usage during startup.
+  

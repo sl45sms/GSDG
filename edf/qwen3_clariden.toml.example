@@ -4,7 +4,7 @@
 # If you try to run an x86_64 image here, Pyxis/Enroot hooks may fail early
 # (often showing "Failed to refresh the dynamic linker cache").
 
-image = "${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh"
+image = "${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh"
 mounts = ["${SCRATCH}:${SCRATCH}"]
 workdir = "${SCRATCH}"
 
