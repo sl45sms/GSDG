@@ -23,21 +23,33 @@ if [[ -z "${CE_ENVIRONMENT}" ]]; then
 	fi
 fi
 
-	# Clariden Enroot hook 89-libfabric-cxi.sh bind-mounts a host libfabric into the
-	# container, which breaks torch import for this image (HPCX MPI expects newer
-	# FABRIC symbol versions). vLLM does not require CXI/libfabric for single-node
-	# serving, so disable the hook.
-	if [[ "${CE_ENVIRONMENT}" == "qwen3-clariden" ]]; then
-		export OCI_ANNOTATION_com__hooks__cxi__enabled=false
-	fi
+# Clariden Enroot hook 89-libfabric-cxi.sh bind-mounts a host libfabric into the
+# container, which breaks torch import for this image (HPCX MPI expects newer
+# FABRIC symbol versions). vLLM does not require CXI/libfabric for single-node
+# serving, so disable the hook.
+if [[ "${CE_ENVIRONMENT}" == "qwen3-clariden" ]]; then
+	export OCI_ANNOTATION_com__hooks__cxi__enabled=false
+	export SLURM_NETWORK=disable_rdzv_get
+fi
 
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B}"
 API_BASE="${API_BASE:-http://localhost:8000/v1}"
 HEALTH_URL="${API_BASE%/v1}/health"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
-REASONING_PARSER="${REASONING_PARSER:-qwen3}"
-export MODEL_NAME
+REASONING_PARSER="${REASONING_PARSER:-}"
+
+# Only enable the Qwen3 reasoning parser for Qwen3-* models.
+# For small-model smokes (e.g. Qwen2.5), passing --reasoning-parser qwen3
+# crashes because the tokenizer doesn't have the Qwen3 think tokens.
+if [[ -z "${REASONING_PARSER}" ]]; then
+	case "${MODEL_NAME}" in
+		*Qwen3*|*qwen3*) REASONING_PARSER="qwen3" ;;
+		*) REASONING_PARSER="" ;;
+	esac
+fi
+
+export MODEL_NAME API_BASE REASONING_PARSER
 
 detect_vllm_host_ip() {
 	local interface_name
@@ -64,63 +76,90 @@ echo "Using VLLM_HOST_IP=${VLLM_HOST_IP}" >&2
 
 echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 
-srun --environment="${CE_ENVIRONMENT}" --ntasks=1 \
-	vllm serve "${MODEL_NAME}" \
-	--host 0.0.0.0 \
-	--port 8000 \
-	--tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
-	--dtype bfloat16 \
-	--max-model-len "${MAX_MODEL_LEN}" \
-	--reasoning-parser "${REASONING_PARSER}" \
-	--language-model-only \
-	> smoke-vllm-server.log 2>&1 &
-server_pid=$!
+# Run server + health + one request inside a single Slurm step.
+# Running the server in a background `srun` and then starting another `srun`
+# often fails on Clariden with: "step creation temporarily disabled".
+srun --environment="${CE_ENVIRONMENT}" --ntasks=1 bash -lc '
+	set -euo pipefail
+	. /opt/gsdg-venv/bin/activate
 
-cleanup() {
-	if kill -0 "${server_pid}" >/dev/null 2>&1; then
-		kill "${server_pid}" || true
-		wait "${server_pid}" || true
+	SERVER_LOG="${PWD}/smoke-vllm-server.log"
+
+	args=(serve "$MODEL_NAME" \
+		--host 0.0.0.0 \
+		--port 8000 \
+		--tensor-parallel-size "'"${TENSOR_PARALLEL_SIZE}"'" \
+		--dtype bfloat16 \
+		--max-model-len "'"${MAX_MODEL_LEN}"'" \
+		--language-model-only)
+	if [[ -n "${REASONING_PARSER:-}" ]]; then
+		args+=(--reasoning-parser "$REASONING_PARSER")
 	fi
-}
-trap cleanup EXIT
 
-for _ in $(seq 1 180); do
-	if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
-		echo "vLLM server exited before becoming healthy" >&2
-		wait "${server_pid}"
-		exit 1
-	fi
-	if curl -sf "${HEALTH_URL}" >/dev/null; then
-		break
-	fi
-	sleep 5
-done
+	/opt/gsdg-venv/bin/vllm "${args[@]}" >"$SERVER_LOG" 2>&1 &
+	server_pid=$!
 
-curl -sf "${HEALTH_URL}" >/dev/null
+	cleanup() {
+		if kill -0 "${server_pid}" >/dev/null 2>&1; then
+			kill "${server_pid}" || true
+			wait "${server_pid}" || true
+		fi
+	}
+	trap cleanup EXIT
 
-srun --environment="${CE_ENVIRONMENT}" --ntasks=1 python - <<'PY'
+	for _ in $(seq 1 180); do
+		if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+			echo "vLLM server exited before becoming healthy" >&2
+			tail -n 200 "$SERVER_LOG" >&2 || true
+			exit 1
+		fi
+		if curl -sf "'"${HEALTH_URL}"'" >/dev/null; then
+			break
+		fi
+		sleep 2
+	done
+
+	curl -sf "'"${HEALTH_URL}"'" >/dev/null
+
+	set +e
+	/opt/gsdg-venv/bin/python - <<"PY"
 import json
 import os
 import requests
 
+api_base = os.environ.get("API_BASE", "http://localhost:8000/v1").rstrip("/")
+model_name = os.environ.get("MODEL_NAME", "")
+
 payload = {
-	"model": os.environ["MODEL_NAME"],
+	"model": model_name,
     "messages": [
         {"role": "system", "content": "Απαντάς σύντομα και ακριβώς."},
         {"role": "user", "content": "Πες μόνο: ok"},
     ],
     "max_tokens": 32,
     "temperature": 0.0,
-    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+	"stream": False,
+	"chat_template_kwargs": {"enable_thinking": False},
 }
 
 response = requests.post(
-    "http://localhost:8000/v1/chat/completions",
+	f"{api_base}/chat/completions",
     headers={"Authorization": "Bearer EMPTY", "Content-Type": "application/json"},
     json=payload,
     timeout=120,
 )
-response.raise_for_status()
+if response.status_code >= 400:
+	print(f"HTTP {response.status_code}\n{response.text}")
+	response.raise_for_status()
 body = response.json()
 print(json.dumps(body, ensure_ascii=False))
 PY
+	request_status=$?
+	set -e
+	if [[ $request_status -ne 0 ]]; then
+		tail -n 200 "$SERVER_LOG" >&2 || true
+		exit $request_status
+	fi
+
+	echo "Server log: $SERVER_LOG" >&2
+'
