@@ -24,6 +24,12 @@ if [[ -z "${CE_ENVIRONMENT}" ]]; then
 	fi
 fi
 
+# Clariden: avoid CXI rendezvous warnings and keep behavior consistent with
+# other Clariden scripts.
+if [[ "${CE_ENVIRONMENT}" == "qwen3-clariden" ]]; then
+	export SLURM_NETWORK=disable_rdzv_get
+fi
+
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B}"
 DATASET_SPLIT="${DATASET_SPLIT:-train}"
 PREFETCH_DATASETS="${PREFETCH_DATASETS:-}"
@@ -32,8 +38,11 @@ SKIP_DATASETS="${SKIP_DATASETS:-0}"
 HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-0}"
 PREFETCH_LOG_LEVEL="${PREFETCH_LOG_LEVEL:-INFO}"
 
+PYTHON_BIN="${PYTHON_BIN:-/opt/gsdg-venv/bin/python}"
+PYTHONPATH_VALUE="${PYTHONPATH_VALUE:-/workspace/src}"
+
 PREFETCH_ARGS=(
-	python /workspace/scripts/prefetch_hf_assets.py
+	"${PYTHON_BIN}" /workspace/scripts/prefetch_hf_assets.py
 	--model "${MODEL_NAME}"
 	--split "${DATASET_SPLIT}"
 	--log-level "${PREFETCH_LOG_LEVEL}"
@@ -64,4 +73,6 @@ fi
 
 echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 
-srun --environment="${CE_ENVIRONMENT}" --export=ALL,HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET}" --ntasks=1 "${PREFETCH_ARGS[@]}"
+srun --environment="${CE_ENVIRONMENT}" \
+	--export=ALL,HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET}",PYTHONPATH="${PYTHONPATH_VALUE}" \
+	--ntasks=1 "${PREFETCH_ARGS[@]}"
