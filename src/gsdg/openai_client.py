@@ -55,9 +55,9 @@ class OpenAICompatibleClient:
             "max_tokens": max_tokens,
         }
         if not enable_thinking:
-            payload["extra_body"] = {
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
+            # vLLM's OpenAI-compatible server expects `chat_template_kwargs` at
+            # the top level; it ignores OpenAI-python's `extra_body` wrapper.
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         response = self.session.post(
             f"{self.api_base}/chat/completions",
