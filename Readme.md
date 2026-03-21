@@ -28,7 +28,7 @@ The recommended operating model is:
 - `scripts/build_container_on_alps.sh`: build and import the CE image on Alps.
 - `scripts/prefetch_hf_assets.sh`: Slurm job to warm model and dataset caches in `${SCRATCH}`.
 - `scripts/run_gsdg_qwen3.sh`: single-job Slurm example.
-- `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher for `Qwen/Qwen3.5-397B-A17B`.
+- `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher for `Qwen/Qwen3.5-397B-A17B`, defaulting to the official FP8 checkpoint on the 397B path.
 - `smoke_test_32b.sh`: convenience wrapper for a 32B vLLM smoke test on Clariden.
 - `prefetch_32b.sh`: convenience wrapper to prefetch `Qwen/Qwen3-32B` weights.
 - `prefetch_datasets.sh`: convenience wrapper to prefetch one or more datasets.
@@ -101,7 +101,7 @@ This creates the SquashFS image at the `SQSH_PATH` you set (for Clariden, typica
 
 For Clariden you should use the Clariden output path `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh` and the corresponding EDF template `edf/qwen3_clariden.toml.example`.
 
-For Clariden, the image recipe in this repo builds vLLM `v0.17.1`, installs Transformers from `main`, and now includes Ray so the next Clariden image rebuild can support a Ray-backed multi-node 397B path.
+For Clariden, the image recipe in this repo builds vLLM `v0.17.1`, installs Transformers from `main`, and now includes Ray for the multi-node 397B path.
 
 If `~/.config/containers/storage.conf` does not exist yet, the helper script creates one that points Podman storage at `/dev/shm/$USER`. This avoids rootless overlay failures on home-backed network filesystems.
 
@@ -197,12 +197,13 @@ See `Agents.md` for the full Bristen runbook and cluster-specific operational gu
 1. Build/import the Clariden image (see above).
 2. Copy `edf/qwen3_clariden.toml.example` to `~/.edf/qwen3-clariden.toml` and adjust the `image = ...` path if needed.
 3. For the validated 32B path, use the existing single-node wrappers.
-4. For `Qwen/Qwen3.5-397B-A17B`, rebuild the Clariden image from `Containerfile.clariden`, then continue the multi-node validation effort from `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh` on a 2-node Clariden allocation shape.
+4. For the 397B path, use `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`, which now defaults to `Qwen/Qwen3.5-397B-A17B-FP8` on a 2-node Clariden allocation shape.
 
 Current 397B Clariden status:
 
-- The launcher is now wired correctly for `2 nodes x 4 GPUs`, `tensor_parallel_size=8`, `pipeline_parallel_size=1`.
-- The currently built Clariden image still fails in vLLM multi-node `mp` worker startup with `inner dp world group is not initialized`.
-- The next required step is a fresh Clariden image rebuild so Ray is available in the runtime image before continuing multi-node 397B validation.
+- The launcher now uses a Ray-backed multi-node path instead of the older failing `mp` path.
+- On Clariden, the bf16 checkpoint `Qwen/Qwen3.5-397B-A17B` is a known OOM on `2 nodes / 8 GPUs` during vLLM startup.
+- The current default is the official FP8 checkpoint `Qwen/Qwen3.5-397B-A17B-FP8` on `2 nodes / 8 GPUs` with `tensor_parallel_size=8`, `pipeline_parallel_size=1`.
+- If you must run the bf16 checkpoint on Clariden, start from `4 nodes / 16 GPUs` with `TENSOR_PARALLEL_SIZE=8` and `PIPELINE_PARALLEL_SIZE=2`.
 
 

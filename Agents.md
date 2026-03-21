@@ -70,9 +70,10 @@ Practical split for this repo:
 
 - **Qwen/Qwen3-32B on Clariden**: validated **single-node** path on **1 GH200 node / 4 GPUs** with `tensor_parallel_size=4`.
 - **Qwen/Qwen3.5-397B-A17B on Clariden**: requires a **multi-node** run because Clariden nodes expose only **4 GPUs per node**.
-	- Start from **2 nodes / 8 GPUs total**. In this repo, the dedicated Clariden launcher now uses the cross-node 8-way layout `tensor_parallel_size=8` and `pipeline_parallel_size=1`.
-	- The launcher wiring is fixed for the 2-node shape, but the **current Clariden image is still not end-to-end validated for 397B**: vLLM `--distributed-executor-backend mp` still fails during worker startup with `inner dp world group is not initialized`.
-	- The next required runtime step for 397B on Clariden is to **rebuild the Clariden image with Ray installed** and use a Ray-backed multi-node serving path.
+	- The dedicated Clariden launcher now uses a **Ray-backed** multi-node serve path and defaults to the official **FP8 checkpoint** `Qwen/Qwen3.5-397B-A17B-FP8`.
+	- On Clariden, the **bf16** checkpoint `Qwen/Qwen3.5-397B-A17B` is now a **known OOM on 2 nodes / 8 GPUs** during vLLM `profile_run`, even with `--language-model-only` and `--max-model-len 8192`.
+	- Recommended starting point on Clariden: **2 nodes / 8 GPUs total** with `tensor_parallel_size=8`, `pipeline_parallel_size=1`, **Ray**, and the **FP8** checkpoint.
+	- If you must run the **bf16** checkpoint on Clariden, start from **4 nodes / 16 GPUs total**. In this repo, the intended fallback shape is `tensor_parallel_size=8` and `pipeline_parallel_size=2`.
 	- Keep the Clariden-specific container/EDF settings: **aarch64 image**, `qwen3-clariden`, CXI hook disabled, and `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` pinned to `nmn0`.
 - The convenience wrappers in the repo root are intentionally for the **32B single-node Clariden workflow**:
 	- `smoke_test_32b.sh`
@@ -329,8 +330,10 @@ For `Qwen/Qwen3.5-397B-A17B`, a **single Clariden node is not enough** for the 8
 What needs to be true for the 397B run on Clariden:
 
 - Use the **Clariden aarch64 image** and `qwen3-clariden` EDF.
+- Prefer the default **FP8** checkpoint `Qwen/Qwen3.5-397B-A17B-FP8` for the current Clariden path.
 - Request **at least 2 nodes** so you have **8 GPUs total**.
-- Use the current 2-node / 8-GPU launcher shape. In this repo that means `tensor_parallel_size=8` and `pipeline_parallel_size=1` on a 2-node job.
+- For the current **FP8** starting point, use `tensor_parallel_size=8` and `pipeline_parallel_size=1` on a 2-node job.
+- For the **bf16** checkpoint, do **not** reuse the 2-node shape: the repo has now observed a reproducible CUDA OOM during vLLM `profile_run` on `2 nodes / 8 GPUs`. Start from **4 nodes / 16 GPUs** with `tensor_parallel_size=8` and `pipeline_parallel_size=2` instead.
 - Keep the Clariden networking/runtime settings:
 	- `OCI_ANNOTATION_com__hooks__cxi__enabled=false`
 	- `SLURM_NETWORK=disable_rdzv_get`
@@ -338,6 +341,12 @@ What needs to be true for the 397B run on Clariden:
 	- `GLOO_SOCKET_IFNAME=nmn0`
 	- `VLLM_HOST_IP` set per rank/node
 - Use a **multi-node vLLM launch**. This repo now provides [scripts/run_gsdg_qwen3_397b_clariden_multinode.sh](/users/p-skarvelis/GSDG/scripts/run_gsdg_qwen3_397b_clariden_multinode.sh), which currently exercises the 2-node layout correctly but is still blocked on the current image by a vLLM multi-node `mp` startup failure. Rebuild the Clariden image from `Containerfile.clariden` before the next 397B attempt so Ray is available in the runtime image.
+
+Current runtime status on Clariden:
+
+- The old multi-node `mp` path is no longer the main blocker; Ray is now installed in the Clariden image and the launcher uses `--distributed-executor-backend ray`.
+- With `VLLM_ALLREDUCE_USE_SYMM_MEM=0`, the Ray-backed launch gets past cluster formation and into checkpoint loading.
+- The remaining validated limit is memory: the **bf16** checkpoint still exhausts `8 x GH200 95 GB` during model/profile initialization, so the current repo default is to run the **FP8** checkpoint for the 2-node Clariden path.
 
 Minimal Slurm resource shape (starting point):
 
@@ -360,11 +369,36 @@ export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b.jsonl
 sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
 ```
 
+If you want the **bf16** checkpoint instead of the default FP8 one, use a larger fallback shape:
+
+```bash
+#!/bin/bash
+#SBATCH -A a0140
+#SBATCH --job-name=qwen3-397b-clariden-bf16
+#SBATCH --partition=normal
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=32
+#SBATCH --time=04:00:00
+
+set -euo pipefail
+
+export MODEL_NAME=Qwen/Qwen3.5-397B-A17B
+export TENSOR_PARALLEL_SIZE=8
+export PIPELINE_PARALLEL_SIZE=2
+export DATASET_NAME=glossAPI/<dataset_name>
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b_bf16.jsonl
+sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
 Notes about the current repo state:
 
 - `scripts/smoke_test_vllm_qwen3.sh` and `scripts/run_gsdg_qwen3.sh` are still **single-node scripts**.
 - They are appropriate for the **32B Clariden workflow** and for single-node smoke/debug work.
-- For **397B on Clariden**, use [scripts/run_gsdg_qwen3_397b_clariden_multinode.sh](/users/p-skarvelis/GSDG/scripts/run_gsdg_qwen3_397b_clariden_multinode.sh) as the base launcher, but treat it as **not yet validated end-to-end on the current image**. The launcher is wired for `tp=8, pp=1, nnodes=2`; the remaining blocker is the current image/runtime combination, not the Slurm node-count wiring.
+- For **397B on Clariden**, use [scripts/run_gsdg_qwen3_397b_clariden_multinode.sh](/users/p-skarvelis/GSDG/scripts/run_gsdg_qwen3_397b_clariden_multinode.sh) as the base launcher.
+- The current launcher default is the **FP8** checkpoint on `2 nodes / 8 GPUs` with `tp=8, pp=1`.
+- If you switch that launcher back to the **bf16** checkpoint, do not reuse the 2-node shape; start from `4 nodes / 16 GPUs` with `tp=8, pp=2`.
 
 ### 6.3 Bristen: model-card-style 8-GPU launch
 
