@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+from importlib.util import find_spec
 
 import ray
 
@@ -22,11 +23,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def maybe_patch_qwen35_gdn_prefill(model_name: str) -> None:
+    if "Qwen3.5" not in model_name:
+        return
+    if find_spec("flashinfer") is not None:
+        return
+
+    import vllm.model_executor.models.qwen3_next as qwen3_next
+
+    def patched_init(self) -> None:
+        qwen3_next.CustomOp.__init__(self)
+        qwen3_next.logger.warning(
+            "flashinfer is not installed; forcing native GDN prefill kernel."
+        )
+        self._forward_method = self.forward_native
+
+    qwen3_next.ChunkGatedDeltaRule.__init__ = patched_init
+
+
 def main() -> None:
     args = parse_args()
 
     os.environ.setdefault("RAY_USAGE_STATS_ENABLED", "0")
     ray.init(address=args.ray_address, logging_level="ERROR")
+    maybe_patch_qwen35_gdn_prefill(args.model)
 
     cli_args = [
         "vllm",
