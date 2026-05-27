@@ -67,6 +67,7 @@ OUTPUT_PATH="${OUTPUT_PATH:-${SCRATCH}/synthetic_chatml_397b.jsonl}"
 API_BASE="${API_BASE:-http://localhost:8000/v1}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.5-397B-A17B-FP8}"
 MAX_ROWS="${MAX_ROWS:-}"
+AUTO_RESUME="${AUTO_RESUME:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MASTER_PORT="${MASTER_PORT:-29501}"
 RAY_PORT="${RAY_PORT:-6379}"
@@ -133,9 +134,92 @@ if [[ -z "${REASONING_PARSER}" ]]; then
 	esac
 fi
 
+RESUME_START_ROW=0
+RESUME_RECORD_COUNT=0
+RESUME_MAX_ROWS="${MAX_ROWS}"
+if [[ "${AUTO_RESUME}" != "0" && -f "${OUTPUT_PATH}" ]]; then
+	if ! command -v python3 >/dev/null 2>&1; then
+		echo "python3 is required to inspect ${OUTPUT_PATH} for auto-resume." >&2
+		exit 1
+	fi
+
+	mapfile -t resume_state < <(python3 - "${OUTPUT_PATH}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+valid_lines = 0
+last_index = None
+original_size = path.stat().st_size
+truncate_at = original_size
+
+with path.open("rb") as handle:
+	while True:
+		line_start = handle.tell()
+		raw_line = handle.readline()
+		if not raw_line:
+			break
+		if not raw_line.strip():
+			truncate_at = handle.tell()
+			continue
+
+		try:
+			record = json.loads(raw_line.decode("utf-8"))
+		except (UnicodeDecodeError, json.JSONDecodeError):
+			truncate_at = line_start
+			break
+
+		truncate_at = handle.tell()
+		valid_lines += 1
+
+		meta = record.get("meta")
+		if isinstance(meta, dict):
+			value = meta.get("source_row_index")
+			if isinstance(value, int):
+				last_index = value
+			elif isinstance(value, str):
+				try:
+					last_index = int(value)
+				except ValueError:
+					pass
+
+if truncate_at < original_size:
+	with path.open("r+b") as handle:
+		handle.truncate(truncate_at)
+
+start_row = last_index + 1 if last_index is not None else valid_lines
+print(start_row)
+print(valid_lines)
+print(original_size - truncate_at)
+PY
+	)
+
+	if (( ${#resume_state[@]} != 3 )); then
+		echo "Failed to derive resume state from ${OUTPUT_PATH}." >&2
+		exit 1
+	fi
+
+	RESUME_START_ROW="${resume_state[0]}"
+	RESUME_RECORD_COUNT="${resume_state[1]}"
+	RESUME_TRUNCATED_BYTES="${resume_state[2]}"
+
+	if (( RESUME_TRUNCATED_BYTES > 0 )); then
+		echo "Auto-resume truncated ${RESUME_TRUNCATED_BYTES} trailing byte(s) from ${OUTPUT_PATH}." >&2
+	fi
+fi
+
+if [[ -n "${MAX_ROWS}" ]]; then
+	if (( RESUME_START_ROW >= MAX_ROWS )); then
+		echo "Existing output already covers the requested row window (start_row=${RESUME_START_ROW}, MAX_ROWS=${MAX_ROWS}). Nothing to do." >&2
+		exit 0
+	fi
+	RESUME_MAX_ROWS="$((MAX_ROWS - RESUME_START_ROW))"
+fi
+
 export DATASET_NAME HF_PARQUET_REPO PARQUET_FILES DATASET_SPLIT OUTPUT_PATH API_BASE MODEL_NAME MAX_ROWS
 export MAX_MODEL_LEN MASTER_PORT TENSOR_PARALLEL_SIZE PIPELINE_PARALLEL_SIZE
-export REASONING_PARSER MASTER_ADDR RAY_PORT
+export REASONING_PARSER MASTER_ADDR RAY_PORT AUTO_RESUME RESUME_START_ROW RESUME_RECORD_COUNT RESUME_MAX_ROWS
 
 PYTHONPATH_VALUE="${PYTHONPATH_VALUE:-}"
 GENERATOR_ENTRYPOINT="/workspace/scripts/generate_chatml.py"
@@ -157,12 +241,18 @@ echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 echo "Using MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}" >&2
 echo "Using TP=${TENSOR_PARALLEL_SIZE} PP=${PIPELINE_PARALLEL_SIZE} across ${SLURM_NNODES} node(s)" >&2
 echo "Using NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} FI_PROVIDER=${FI_PROVIDER}" >&2
+if [[ "${AUTO_RESUME}" != "0" ]]; then
+	echo "Auto-resume start row: ${RESUME_START_ROW} (${RESUME_RECORD_COUNT} existing record(s))" >&2
+	if [[ -n "${MAX_ROWS}" ]]; then
+		echo "Auto-resume remaining MAX_ROWS window: ${RESUME_MAX_ROWS}" >&2
+	fi
+fi
 
 SRUN_EXPORT="ALL"
 if [[ -n "${PYTHONPATH_VALUE}" ]]; then
 	SRUN_EXPORT+=",PYTHONPATH=${PYTHONPATH_VALUE}"
 fi
-SRUN_EXPORT+=",MASTER_ADDR=${MASTER_ADDR},MASTER_PORT=${MASTER_PORT},RAY_PORT=${RAY_PORT},GENERATOR_ENTRYPOINT=${GENERATOR_ENTRYPOINT},SITECUSTOMIZE_INSTALLER=${SITECUSTOMIZE_INSTALLER},VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING},VLLM_ALLREDUCE_USE_SYMM_MEM=${VLLM_ALLREDUCE_USE_SYMM_MEM},NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME},GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME},NCCL_CROSS_NIC=${NCCL_CROSS_NIC},FI_PROVIDER=${FI_PROVIDER},FI_CXI_DEFAULT_CQ_SIZE=${FI_CXI_DEFAULT_CQ_SIZE},FI_CXI_DEFAULT_TX_SIZE=${FI_CXI_DEFAULT_TX_SIZE},FI_CXI_DISABLE_HOST_REGISTER=${FI_CXI_DISABLE_HOST_REGISTER},FI_CXI_RX_MATCH_MODE=${FI_CXI_RX_MATCH_MODE},FI_MR_CACHE_MONITOR=${FI_MR_CACHE_MONITOR}"
+SRUN_EXPORT+=",MASTER_ADDR=${MASTER_ADDR},MASTER_PORT=${MASTER_PORT},RAY_PORT=${RAY_PORT},GENERATOR_ENTRYPOINT=${GENERATOR_ENTRYPOINT},SITECUSTOMIZE_INSTALLER=${SITECUSTOMIZE_INSTALLER},VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING},VLLM_ALLREDUCE_USE_SYMM_MEM=${VLLM_ALLREDUCE_USE_SYMM_MEM},NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME},GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME},NCCL_CROSS_NIC=${NCCL_CROSS_NIC},FI_PROVIDER=${FI_PROVIDER},FI_CXI_DEFAULT_CQ_SIZE=${FI_CXI_DEFAULT_CQ_SIZE},FI_CXI_DEFAULT_TX_SIZE=${FI_CXI_DEFAULT_TX_SIZE},FI_CXI_DISABLE_HOST_REGISTER=${FI_CXI_DISABLE_HOST_REGISTER},FI_CXI_RX_MATCH_MODE=${FI_CXI_RX_MATCH_MODE},FI_MR_CACHE_MONITOR=${FI_MR_CACHE_MONITOR},RESUME_START_ROW=${RESUME_START_ROW},RESUME_MAX_ROWS=${RESUME_MAX_ROWS}"
 
 srun --environment="${CE_ENVIRONMENT}" \
 	--export="${SRUN_EXPORT}" \
@@ -363,6 +453,7 @@ PY
 	generator_args=(
 		/opt/gsdg-venv/bin/python "$GENERATOR_ENTRYPOINT"
 		--split "$DATASET_SPLIT"
+		--start-row "$RESUME_START_ROW"
 		--out "$OUTPUT_PATH"
 		--api-base "$API_BASE"
 		--model "$MODEL_NAME"
@@ -383,8 +474,8 @@ PY
 			fi
 		done
 	fi
-	if [[ -n "${MAX_ROWS}" ]]; then
-		generator_args+=(--max-rows "$MAX_ROWS")
+	if [[ -n "${RESUME_MAX_ROWS}" ]]; then
+		generator_args+=(--max-rows "$RESUME_MAX_ROWS")
 	fi
 
 	"${generator_args[@]}"

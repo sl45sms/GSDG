@@ -33,6 +33,7 @@ def build_chatml_record(
     dataset_name: str,
     split_name: str,
     row_id: str,
+    source_row_index: int,
     source_fields: str,
 ) -> dict:
     assistant_content = json.dumps(
@@ -48,6 +49,7 @@ def build_chatml_record(
             "dataset": dataset_name,
             "split": split_name,
             "row_id": row_id,
+            "source_row_index": source_row_index,
             "source_fields": source_fields,
         },
     }

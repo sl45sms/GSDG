@@ -282,9 +282,11 @@ def run(args: argparse.Namespace) -> int:
                 dataset_name=source_label,
                 split_name=args.split,
                 row_id=row_id,
+                source_row_index=row_index,
                 source_fields=source_fields,
             )
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
             written += 1
 
     LOGGER.info("Finished generation: written=%s skipped=%s out=%s", written, skipped, output_path)
