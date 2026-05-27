@@ -23,7 +23,9 @@ if [[ -z "${CE_ENVIRONMENT}" ]]; then
 	fi
 fi
 
-DATASET_NAME="${DATASET_NAME:?Set DATASET_NAME to a glossAPI dataset name}"
+DATASET_NAME="${DATASET_NAME:-}"
+HF_PARQUET_REPO="${HF_PARQUET_REPO:-}"
+PARQUET_FILES="${PARQUET_FILES:-}"
 DATASET_SPLIT="${DATASET_SPLIT:-train}"
 OUTPUT_PATH="${OUTPUT_PATH:-${SCRATCH}/synthetic_chatml_small.jsonl}"
 API_BASE="${API_BASE:-http://localhost:8000/v1}"
@@ -32,6 +34,26 @@ MAX_ROWS="${MAX_ROWS:-16}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
+
+if [[ -z "${DATASET_NAME}" && -z "${PARQUET_FILES}" ]]; then
+	echo "Set DATASET_NAME, or set PARQUET_FILES for local parquet input, or set HF_PARQUET_REPO together with PARQUET_FILES for Hugging Face parquet input." >&2
+	exit 1
+fi
+
+if [[ -n "${DATASET_NAME}" && -n "${PARQUET_FILES}" ]]; then
+	echo "Set either DATASET_NAME or PARQUET_FILES, not both." >&2
+	exit 1
+fi
+
+if [[ -n "${HF_PARQUET_REPO}" && -n "${DATASET_NAME}" ]]; then
+	echo "HF_PARQUET_REPO can only be used together with PARQUET_FILES, not DATASET_NAME." >&2
+	exit 1
+fi
+
+if [[ -n "${HF_PARQUET_REPO}" && -z "${PARQUET_FILES}" ]]; then
+	echo "HF_PARQUET_REPO requires PARQUET_FILES." >&2
+	exit 1
+fi
 
 detect_vllm_host_ip() {
 	local interface_name
@@ -94,12 +116,30 @@ curl -sf http://localhost:8000/health >/dev/null
 
 GENERATOR_ARGS=(
 	python /workspace/scripts/generate_chatml.py
-	--dataset "${DATASET_NAME}"
 	--split "${DATASET_SPLIT}"
 	--out "${OUTPUT_PATH}"
 	--api-base "${API_BASE}"
 	--model "${MODEL_NAME}"
 	--max-rows "${MAX_ROWS}"
 )
+
+if [[ -n "${DATASET_NAME}" ]]; then
+	GENERATOR_ARGS+=(--dataset "${DATASET_NAME}")
+fi
+
+if [[ -n "${HF_PARQUET_REPO}" ]]; then
+	GENERATOR_ARGS+=(--hf-parquet-repo "${HF_PARQUET_REPO}")
+fi
+
+if [[ -n "${PARQUET_FILES}" ]]; then
+	IFS=, read -r -a parquet_patterns <<< "${PARQUET_FILES}"
+	for parquet_pattern in "${parquet_patterns[@]}"; do
+		trimmed_pattern="${parquet_pattern#"${parquet_pattern%%[![:space:]]*}"}"
+		trimmed_pattern="${trimmed_pattern%"${trimmed_pattern##*[![:space:]]}"}"
+		if [[ -n "${trimmed_pattern}" ]]; then
+			GENERATOR_ARGS+=(--parquet-file "${trimmed_pattern}")
+		fi
+	done
+fi
 
 srun --environment="${CE_ENVIRONMENT}" --ntasks=1 "${GENERATOR_ARGS[@]}"

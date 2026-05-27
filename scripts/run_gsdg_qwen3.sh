@@ -35,7 +35,9 @@ if [[ "${CE_ENVIRONMENT}" == "qwen3-clariden" ]]; then
 	export SLURM_NETWORK=disable_rdzv_get
 fi
 
-DATASET_NAME="${DATASET_NAME:?Set DATASET_NAME to a glossAPI dataset name}"
+DATASET_NAME="${DATASET_NAME:-}"
+HF_PARQUET_REPO="${HF_PARQUET_REPO:-}"
+PARQUET_FILES="${PARQUET_FILES:-}"
 DATASET_SPLIT="${DATASET_SPLIT:-train}"
 OUTPUT_PATH="${OUTPUT_PATH:-${SCRATCH}/synthetic_chatml.jsonl}"
 API_BASE="${API_BASE:-http://localhost:8000/v1}"
@@ -44,6 +46,26 @@ MAX_ROWS="${MAX_ROWS:-}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 REASONING_PARSER="${REASONING_PARSER:-}"
+
+if [[ -z "${DATASET_NAME}" && -z "${PARQUET_FILES}" ]]; then
+	echo "Set DATASET_NAME, or set PARQUET_FILES for local parquet input, or set HF_PARQUET_REPO together with PARQUET_FILES for Hugging Face parquet input." >&2
+	exit 1
+fi
+
+if [[ -n "${DATASET_NAME}" && -n "${PARQUET_FILES}" ]]; then
+	echo "Set either DATASET_NAME or PARQUET_FILES, not both." >&2
+	exit 1
+fi
+
+if [[ -n "${HF_PARQUET_REPO}" && -n "${DATASET_NAME}" ]]; then
+	echo "HF_PARQUET_REPO can only be used together with PARQUET_FILES, not DATASET_NAME." >&2
+	exit 1
+fi
+
+if [[ -n "${HF_PARQUET_REPO}" && -z "${PARQUET_FILES}" ]]; then
+	echo "HF_PARQUET_REPO requires PARQUET_FILES." >&2
+	exit 1
+fi
 
 # Only enable the Qwen3 reasoning parser for Qwen3-* models.
 if [[ -z "${REASONING_PARSER}" ]]; then
@@ -93,6 +115,8 @@ if [[ -n "${PYTHONPATH_VALUE}" ]]; then
 	SRUN_EXPORT+=",PYTHONPATH=${PYTHONPATH_VALUE}"
 fi
 
+export DATASET_NAME HF_PARQUET_REPO PARQUET_FILES DATASET_SPLIT OUTPUT_PATH API_BASE MODEL_NAME MAX_ROWS
+
 # Run server + health + generation inside a single Slurm step.
 srun --environment="${CE_ENVIRONMENT}" \
 	--export="${SRUN_EXPORT}" \
@@ -140,11 +164,26 @@ srun --environment="${CE_ENVIRONMENT}" \
 
 	generator_args=(
 		/opt/gsdg-venv/bin/python "'"${GENERATOR_ENTRYPOINT}"'" \
-		--dataset "'"${DATASET_NAME}"'" \
 		--split "'"${DATASET_SPLIT}"'" \
 		--out "'"${OUTPUT_PATH}"'" \
 		--api-base "'"${API_BASE}"'" \
 		--model "'"${MODEL_NAME}"'")
+	if [[ -n "${DATASET_NAME:-}" ]]; then
+		generator_args+=(--dataset "${DATASET_NAME}")
+	fi
+	if [[ -n "${HF_PARQUET_REPO:-}" ]]; then
+		generator_args+=(--hf-parquet-repo "${HF_PARQUET_REPO}")
+	fi
+	if [[ -n "${PARQUET_FILES:-}" ]]; then
+		IFS=, read -r -a parquet_patterns <<< "${PARQUET_FILES}"
+		for parquet_pattern in "${parquet_patterns[@]}"; do
+			trimmed_pattern="${parquet_pattern#"${parquet_pattern%%[![:space:]]*}"}"
+			trimmed_pattern="${trimmed_pattern%"${trimmed_pattern##*[![:space:]]}"}"
+			if [[ -n "${trimmed_pattern}" ]]; then
+				generator_args+=(--parquet-file "${trimmed_pattern}")
+			fi
+		done
+	fi
 	if [[ -n "'"${MAX_ROWS}"'" ]]; then
 		generator_args+=(--max-rows "'"${MAX_ROWS}"'")
 	fi
