@@ -10,6 +10,18 @@
 
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Match the convenience wrappers: if HF_TOKEN is not already exported, load the
+# repo-local .env so direct `sbatch scripts/...` submissions can access gated HF
+# assets without an extra manual `source .env` step.
+if [[ -z "${HF_TOKEN:-}" && -f "${ROOT_DIR}/.env" ]]; then
+	set -a
+	# shellcheck disable=SC1091
+	source "${ROOT_DIR}/.env"
+	set +a
+fi
+
 CE_ENVIRONMENT="${CE_ENVIRONMENT:-}"
 if [[ -z "${CE_ENVIRONMENT}" ]]; then
 	cluster_hint="${SLURM_CLUSTER_NAME:-${SLURM_SUBMIT_HOST:-}}"
