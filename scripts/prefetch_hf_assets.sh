@@ -11,6 +11,18 @@
 
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Match the convenience wrappers: if HF_TOKEN is not already exported, load the
+# repo-local .env so direct `sbatch scripts/...` submissions can access gated HF
+# assets without an extra manual `source .env` step.
+if [[ -z "${HF_TOKEN:-}" && -f "${ROOT_DIR}/.env" ]]; then
+	set -a
+	# shellcheck disable=SC1091
+	source "${ROOT_DIR}/.env"
+	set +a
+fi
+
 STAGE_WORKSPACE="${STAGE_WORKSPACE:-1}"
 STAGE_ROOT="${STAGE_ROOT:-${SCRATCH}/gsdg_workspace_${SLURM_JOB_ID}}"
 
