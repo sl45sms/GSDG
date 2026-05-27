@@ -22,8 +22,10 @@ The recommended operating model is:
 - `src/gsdg/openai_client.py`: local OpenAI-compatible API client and JSON parsing.
 - `src/gsdg/prefetch.py`: HuggingFace model and dataset cache prefetching.
 - `src/gsdg/generator.py`: main CLI entry point.
+- `src/gsdg/combine_jsonl.py`: JSONL combine utility with optional Q/A-based dedupe and row_id renumbering.
 - `scripts/generate_chatml.py`: script wrapper.
 - `scripts/prefetch_hf_assets.py`: cache prefetch script wrapper.
+- `scripts/combine_jsonl.py`: script wrapper for combining two or more JSONL outputs.
 - `scripts/setup_uenv_python.sh`: build-time Python environment setup via `uenv`.
 - `scripts/build_container_on_alps.sh`: build and import the CE image on Alps.
 - `scripts/prefetch_hf_assets.sh`: Slurm job to warm model and dataset caches in `${SCRATCH}`.
@@ -69,6 +71,36 @@ python scripts/generate_chatml.py \
 ```
 
 By default the generator requests Qwen3.5 in non-thinking mode through the OpenAI-compatible API, which is more reliable for strict JSON output. Pass `--enable-thinking` only if you explicitly want reasoning traces.
+
+## Combine existing JSONL outputs
+
+Use the combine tool to merge two or more JSONL files produced by this repo:
+
+```bash
+python3 scripts/combine_jsonl.py \
+	outputs/file_a.jsonl \
+	outputs/file_b.jsonl \
+	--out outputs/combined.jsonl
+```
+
+Optional dedupe keeps the first occurrence of each unique question/answer pair:
+
+```bash
+python3 scripts/combine_jsonl.py \
+	outputs/file_a.jsonl \
+	outputs/file_b.jsonl \
+	outputs/file_c.jsonl \
+	--out outputs/combined_deduped.jsonl \
+	--dedupe
+```
+
+Combine behavior summary:
+
+- Input order is preserved in the output.
+- Each non-empty line must be valid JSON.
+- With `--dedupe`, duplicates are removed only when the extracted `question` and `answer` are identical.
+- During combine, `meta.row_id` is renumbered sequentially (`0..N-1`) based on final output order (after dedupe).
+- `--out` must be different from every input path.
 
 ## Container build on Alps
 
