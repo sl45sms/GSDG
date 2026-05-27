@@ -42,13 +42,47 @@ PREFETCH_DATASETS='glossAPI/Sxolika_vivlia,glossAPI/istorima' ./prefetch_dataset
 Note: `glossAPI/istorima` currently has no loadable dataset files on the Hub
 (docs-only repo), so it will be skipped with a warning.
 
-## 5) Full run (dataset → ChatML JSONL)
+## 5) Full run (dataset or parquet → ChatML JSONL)
 
-End-to-end run for `glossAPI/Sxolika_vivlia` + `Qwen/Qwen3-32B`:
+Default end-to-end run for `glossAPI/Sxolika_vivlia` + `Qwen/Qwen3-32B`:
 
 ```bash
 ./run_single_dataset_32b.sh
 ```
+
+Specific parquet file from the Hugging Face repo `fffoivos/glossapi-greek-nanochat-pretraining-dataset`:
+
+```bash
+unset DATASET_NAME
+export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
+export PARQUET_FILES=1000_prwta_xronia_ellhnikhs.parquet
+./run_single_dataset_32b.sh
+```
+
+All matching HPLT parquet shards from the same Hugging Face repo into one JSONL:
+
+```bash
+unset DATASET_NAME
+export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
+export PARQUET_FILES='HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet'
+./run_single_dataset_32b.sh
+```
+
+Local parquet file or local parquet glob:
+
+```bash
+unset DATASET_NAME
+unset HF_PARQUET_REPO
+export PARQUET_FILES=/path/to/my_downloaded_file.parquet
+./run_single_dataset_32b.sh
+
+unset DATASET_NAME
+unset HF_PARQUET_REPO
+export PARQUET_FILES='/path/to/HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet'
+./run_single_dataset_32b.sh
+```
+
+If you want to combine multiple exact files or patterns in one run, set `PARQUET_FILES` as a comma-separated list.
 
 By default the Slurm scripts stage the current repo into `$SCRATCH` and set
 `PYTHONPATH` inside the container, so small Python changes take effect without
@@ -61,6 +95,26 @@ For the current default 397B path, use the dedicated multi-node launcher:
 ```bash
 export DATASET_NAME=glossAPI/Sxolika_vivlia
 export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b.jsonl
+sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
+The same input selectors also work for the 397B path. For example, a specific HF parquet file:
+
+```bash
+unset DATASET_NAME
+export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
+export PARQUET_FILES=1000_prwta_xronia_ellhnikhs.parquet
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b.jsonl
+sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
+```
+
+Or a local parquet file:
+
+```bash
+unset DATASET_NAME
+unset HF_PARQUET_REPO
+export PARQUET_FILES=/path/to/my_downloaded_file.parquet
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_397b_local.jsonl
 sbatch scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
 ```
 

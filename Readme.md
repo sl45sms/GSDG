@@ -9,7 +9,7 @@ The recommended operating model is:
 
 ## What is implemented
 
-- A Python CLI that loads a HuggingFace dataset split, extracts the best text payload from each row, calls an OpenAI-compatible inference endpoint, and writes ChatML records.
+- A Python CLI that loads either a HuggingFace dataset split or selected parquet files from a Hugging Face dataset repo or the local filesystem, extracts the best text payload from each row, calls an OpenAI-compatible inference endpoint, and writes ChatML records.
 - Text extraction heuristics for heterogeneous GlossAPI schemas.
 - A strict Greek prompt template that asks Qwen3.5 for exactly one question/answer pair per row.
 - `uenv` and container build scaffolding for CSCS Bristen.
@@ -58,7 +58,9 @@ This gives you a current Python toolchain for validation and development without
 
 ## Local CLI usage
 
-Run the generator against an already-running local OpenAI-compatible server:
+Run the generator against an already-running local OpenAI-compatible server.
+
+Hugging Face dataset mode:
 
 ```bash
 python scripts/generate_chatml.py \
@@ -69,6 +71,46 @@ python scripts/generate_chatml.py \
 	--model Qwen/Qwen3.5-397B-A17B \
 	--max-rows 100
 ```
+
+Specific parquet file from a Hugging Face dataset repo:
+
+```bash
+python scripts/generate_chatml.py \
+	--hf-parquet-repo fffoivos/glossapi-greek-nanochat-pretraining-dataset \
+	--parquet-file 1000_prwta_xronia_ellhnikhs.parquet \
+	--out outputs/1000_prwta_xronia_ellhnikhs.jsonl \
+	--api-base http://localhost:8000/v1 \
+	--model Qwen/Qwen3.5-397B-A17B
+```
+
+Multiple parquet shards from a Hugging Face dataset repo via glob:
+
+```bash
+python scripts/generate_chatml.py \
+	--hf-parquet-repo fffoivos/glossapi-greek-nanochat-pretraining-dataset \
+	--parquet-file 'HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet' \
+	--out outputs/hplt_clean60.jsonl \
+	--api-base http://localhost:8000/v1 \
+	--model Qwen/Qwen3.5-397B-A17B
+```
+
+Local parquet file or local glob:
+
+```bash
+python scripts/generate_chatml.py \
+	--parquet-file /path/to/1000_prwta_xronia_ellhnikhs.parquet \
+	--out outputs/local_parquet.jsonl \
+	--api-base http://localhost:8000/v1 \
+	--model Qwen/Qwen3.5-397B-A17B
+
+python scripts/generate_chatml.py \
+	--parquet-file '/path/to/HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet' \
+	--out outputs/local_hplt.jsonl \
+	--api-base http://localhost:8000/v1 \
+	--model Qwen/Qwen3.5-397B-A17B
+```
+
+For parquet input you can repeat `--parquet-file` to combine multiple exact files or glob patterns into one JSONL. When you select parquet files, `--split` is still accepted and is used as the logical split label written into the output metadata.
 
 By default the generator requests Qwen3.5 in non-thinking mode through the OpenAI-compatible API, which is more reliable for strict JSON output. Pass `--enable-thinking` only if you explicitly want reasoning traces.
 
@@ -204,6 +246,34 @@ Example submission:
 ```bash
 export DATASET_NAME=glossAPI/<dataset_name>
 export OUTPUT_PATH=${SCRATCH}/synthetic_chatml.jsonl
+sbatch scripts/run_gsdg_qwen3.sh
+```
+
+Hugging Face parquet selection via the Slurm launcher uses `PARQUET_FILES` as a comma-separated list and optionally `HF_PARQUET_REPO`:
+
+```bash
+unset DATASET_NAME
+export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
+export PARQUET_FILES=1000_prwta_xronia_ellhnikhs.parquet
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_1000_prwta.jsonl
+sbatch scripts/run_gsdg_qwen3.sh
+```
+
+```bash
+unset DATASET_NAME
+export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
+export PARQUET_FILES=HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_hplt.jsonl
+sbatch scripts/run_gsdg_qwen3.sh
+```
+
+For a local parquet file, omit `HF_PARQUET_REPO` and point `PARQUET_FILES` at the local path or glob:
+
+```bash
+unset DATASET_NAME
+unset HF_PARQUET_REPO
+export PARQUET_FILES=/path/to/my_downloaded_file.parquet
+export OUTPUT_PATH=${SCRATCH}/synthetic_chatml_local.jsonl
 sbatch scripts/run_gsdg_qwen3.sh
 ```
 
