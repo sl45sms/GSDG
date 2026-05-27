@@ -197,6 +197,19 @@ export PREFETCH_DATASETS=glossAPI/<dataset_a>,glossAPI/<dataset_b>
 sbatch scripts/prefetch_hf_assets.sh
 ```
 
+For gated parquet repos that 401 from inside the CE container, prefetch the
+selected parquet files host-side with `uenv` and then point the Slurm job at
+the local copies:
+
+```bash
+export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
+export PARQUET_FILES='HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet'
+./prefetch_parquet_repo.sh
+
+unset HF_PARQUET_REPO
+export PARQUET_FILES="${SCRATCH}/gsdg_parquet_prefetch/fffoivos__glossapi-greek-nanochat-pretraining-dataset/data/HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet"
+```
+
 The script runs inside the CE environment, so it uses the same `${SCRATCH}`-backed `HF_HOME` and `HF_DATASETS_CACHE` settings as the runtime job.
 
 The default prefetch job footprint is intentionally small and queue-friendly: 1 task, 4 CPUs, 32 GB RAM, 0 GPUs. You can override that on submission if you need a larger model-only job shape.
