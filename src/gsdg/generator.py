@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from datasets import load_dataset
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, snapshot_download
 from tqdm import tqdm
 
 from gsdg.openai_client import InferenceError, OpenAICompatibleClient, parse_qa_json
@@ -84,7 +84,14 @@ def resolve_hf_parquet_files(repo_id: str, patterns: Sequence[str], token: Optio
         resolved_files.extend(matches)
 
     unique_files = _dedupe_preserving_order(resolved_files)
-    return [f"hf://datasets/{repo_id}/{repo_file}" for repo_file in unique_files]
+    snapshot_path = snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        allow_patterns=list(unique_files),
+        token=token,
+        resume_download=True,
+    )
+    return [str(Path(snapshot_path, repo_file)) for repo_file in unique_files]
 
 
 def build_source_label(args: argparse.Namespace) -> str:

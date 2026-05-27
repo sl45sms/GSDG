@@ -1,13 +1,64 @@
 import argparse
+import fnmatch
 import logging
 import os
+from pathlib import Path
+from typing import Optional, Sequence
 
 from datasets import load_dataset
 from datasets.exceptions import DataFilesNotFoundError
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, snapshot_download
 
 
 LOGGER = logging.getLogger("gsdg.prefetch")
+
+
+def _match_hf_repo_files(repo_files: Sequence[str], pattern: str) -> list[str]:
+    normalized_pattern = pattern.lstrip("/")
+    if "/" in normalized_pattern:
+        return sorted(
+            repo_file
+            for repo_file in repo_files
+            if fnmatch.fnmatch(repo_file, normalized_pattern)
+        )
+
+    return sorted(
+        repo_file
+        for repo_file in repo_files
+        if fnmatch.fnmatch(Path(repo_file).name, normalized_pattern)
+    )
+
+
+def resolve_hf_parquet_repo_files(repo_id: str, patterns: Sequence[str], token: Optional[str]) -> list[str]:
+    repo_files = HfApi(token=token).list_repo_files(repo_id=repo_id, repo_type="dataset")
+    parquet_repo_files = [repo_file for repo_file in repo_files if repo_file.endswith(".parquet")]
+    if not parquet_repo_files:
+        raise FileNotFoundError(f"Dataset repo {repo_id} does not contain any parquet files")
+
+    resolved_files = []
+    for pattern in patterns:
+        matches = _match_hf_repo_files(parquet_repo_files, pattern)
+        if not matches:
+            raise FileNotFoundError(
+                f"No parquet files in dataset repo {repo_id} matched: {pattern}"
+            )
+        resolved_files.extend(matches)
+
+    unique_files = []
+    seen_files = set()
+    for repo_file in resolved_files:
+        if repo_file in seen_files:
+            continue
+        unique_files.append(repo_file)
+        seen_files.add(repo_file)
+
+    return unique_files
+
+
+def default_parquet_out_dir(repo_id: str) -> str:
+    scratch_root = os.environ.get("SCRATCH")
+    base_dir = Path(scratch_root) if scratch_root else Path.cwd()
+    return str(base_dir / "gsdg_parquet_prefetch" / repo_id.replace("/", "__"))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +92,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional HF token; defaults to HF_TOKEN from the environment",
     )
     parser.add_argument(
+        "--hf-parquet-repo",
+        help="Hugging Face dataset repo containing parquet files selected via --parquet-file",
+    )
+    parser.add_argument(
+        "--parquet-file",
+        dest="parquet_files",
+        action="append",
+        default=[],
+        help=(
+            "Parquet file path or glob inside --hf-parquet-repo. Repeat to combine multiple selections. "
+            "Patterns match repo-relative paths or basenames."
+        ),
+    )
+    parser.add_argument(
+        "--parquet-out-dir",
+        default=None,
+        help="Target directory for prefetched parquet files from --hf-parquet-repo",
+    )
+    parser.add_argument(
         "--skip-model",
         action="store_true",
         help="Skip model prefetching",
@@ -72,7 +142,6 @@ def prefetch_model(model: str, revision: str, token: str) -> None:
         revision=revision,
         token=token,
         repo_type="model",
-        resume_download=True,
     )
     LOGGER.info("Model %s cached at %s", model, snapshot_path)
 
@@ -88,9 +157,41 @@ def prefetch_dataset(dataset_name: str, split_name: str, token: str) -> None:
     )
 
 
+def prefetch_parquet_repo(
+    repo_id: str,
+    parquet_files: Sequence[str],
+    token: Optional[str],
+    out_dir: Optional[str],
+) -> None:
+    resolved_files = resolve_hf_parquet_repo_files(repo_id, parquet_files, token)
+    target_dir = out_dir or default_parquet_out_dir(repo_id)
+    LOGGER.info(
+        "Prefetching %s parquet file(s) from %s into %s",
+        len(resolved_files),
+        repo_id,
+        target_dir,
+    )
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        allow_patterns=resolved_files,
+        token=token,
+        local_dir=target_dir,
+    )
+    LOGGER.info("Parquet prefetch completed: %s", target_dir)
+
+
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.hf_parquet_repo and not args.parquet_files:
+        parser.error("--hf-parquet-repo requires at least one --parquet-file")
+    if args.parquet_files and not args.hf_parquet_repo:
+        parser.error("--parquet-file requires --hf-parquet-repo")
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    validate_args(parser, args)
     configure_logging(args.log_level)
 
     token = args.token or os.environ.get("HF_TOKEN")
@@ -124,6 +225,14 @@ def main() -> int:
             except Exception:
                 # Keep prefetch best-effort across multiple datasets.
                 LOGGER.exception("Failed to prefetch dataset %s", dataset_name)
+
+    if args.hf_parquet_repo:
+        prefetch_parquet_repo(
+            repo_id=args.hf_parquet_repo,
+            parquet_files=args.parquet_files,
+            token=token,
+            out_dir=args.parquet_out_dir,
+        )
 
     LOGGER.info("Prefetch completed successfully")
 
