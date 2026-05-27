@@ -39,6 +39,19 @@ Datasets-only prefetch (comma-separated list):
 PREFETCH_DATASETS='glossAPI/Sxolika_vivlia,glossAPI/istorima' ./prefetch_datasets.sh
 ```
 
+For gated parquet repos that 401 from inside the CE container, prefetch the
+selected parquet files host-side with `uenv` and then point the Slurm job at
+the local copies:
+
+```bash
+export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
+export PARQUET_FILES='HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet'
+./prefetch_parquet_repo.sh
+
+unset HF_PARQUET_REPO
+export PARQUET_FILES="${SCRATCH}/gsdg_parquet_prefetch/fffoivos__glossapi-greek-nanochat-pretraining-dataset/data/HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet"
+```
+
 Note: `glossAPI/istorima` currently has no loadable dataset files on the Hub
 (docs-only repo), so it will be skipped with a warning.
 
