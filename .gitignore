@@ -19,4 +19,5 @@ core_clariden-*
 .last_*
 *.so.*
 *.count
+.venv-uenv
 
