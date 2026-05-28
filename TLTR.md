@@ -171,7 +171,7 @@ This job will:
 
 - start the same Ray-backed `Qwen/Qwen3.5-397B-A17B-FP8` API inside the Slurm allocation,
 - run `scripts/curate_jsonl.py` against a snapshot of `INPUT_JSONL`,
-- write accepted samples into `${CURATION_OUT_DIR}/politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, and `general.jsonl`,
+- write accepted samples into `${CURATION_OUT_DIR}/politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, `religion.jsonl`, `education.jsonl`, `philosophy.jsonl`, and `general.jsonl`,
 - write rejects into `${REJECT_LOG}`,
 - persist resume and de-duplication state in `${CURATION_OUT_DIR}/.curation_state.sqlite3`.
 

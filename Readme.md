@@ -177,7 +177,7 @@ Deterministic-only mode skips the LLM review stage and keeps only the rule-based
 
 Curation behavior summary:
 
-- Accepted samples are written into one file per category: `politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, `general.jsonl`.
+- Accepted samples are written into one file per category: `politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, `religion.jsonl`, `education.jsonl`, `philosophy.jsonl`, `general.jsonl`.
 - Rejected samples can be logged with reason codes via `--reject-log`.
 - Resume state and the MinHash-LSH near-duplicate index are stored in a SQLite DB at `--state-db` or, by default, `${out_dir}/.curation_state.sqlite3`.
 - Re-running the same command continues from the highest processed `meta.source_row_index`, so it is safe to use when the source JSONL is still growing.
