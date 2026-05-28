@@ -155,4 +155,37 @@ sbatch --nodes=4 scripts/run_gsdg_qwen3_397b_clariden_multinode.sh
 
 ### Notes:
   - view the log with `tail -f /iopsstor/scratch/cscs/${USER}/vllm-397b-node0.log` (or `node1.log` for the second node) to confirm the expected checkpoint is being loaded and to monitor GPU memory usage during startup.
+
+## 7) Curate an existing JSONL with 397B on Clariden
+
+To run quality filtering, semantic review, classification, and near-duplicate removal on an existing generator-produced JSONL, submit the dedicated curation launcher:
+
+```bash
+export INPUT_JSONL=/users/p-skarvelis/GSDG/outputs/combined_deduped_Wikisource_Greek_texts.jsonl
+export CURATION_OUT_DIR=${SCRATCH}/synthetics
+export REJECT_LOG=${SCRATCH}/synthetics/rejects_wikisource.jsonl
+sbatch scripts/run_curate_qwen3_397b_clariden_multinode.sh
+```
+
+This job will:
+
+- start the same Ray-backed `Qwen/Qwen3.5-397B-A17B-FP8` API inside the Slurm allocation,
+- run `scripts/curate_jsonl.py` against a snapshot of `INPUT_JSONL`,
+- write accepted samples into `${CURATION_OUT_DIR}/politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, and `general.jsonl`,
+- write rejects into `${REJECT_LOG}`,
+- persist resume and de-duplication state in `${CURATION_OUT_DIR}/.curation_state.sqlite3`.
+
+If the source JSONL is still growing, submit the same command again later. The curation pass continues from the highest processed `meta.source_row_index` instead of starting over.
+
+If you want deterministic-only filtering without model review, add:
+
+```bash
+export DISABLE_LLM_REVIEW=1
+sbatch scripts/run_curate_qwen3_397b_clariden_multinode.sh
+```
+
+Logs:
+
+- follow `slurm-<jobid>.out` for the launcher progress and the final server-log path,
+- or tail the vLLM log in the job working directory, typically `${SCRATCH}/vllm-curate-397b-node0.log` (and `node1.log` for the second node).
   

@@ -10,6 +10,7 @@ The recommended operating model is:
 ## What is implemented
 
 - A Python CLI that loads either a HuggingFace dataset split or selected parquet files from a Hugging Face dataset repo or the local filesystem, extracts the best text payload from each row, calls an OpenAI-compatible inference endpoint, and writes ChatML records.
+- A Python CLI that curates existing generated JSONL files, applies deterministic quality filters, optionally asks the model for semantic review/classification, and writes accepted samples into category-specific JSONL files.
 - Text extraction heuristics for heterogeneous GlossAPI schemas.
 - A strict Greek prompt template that asks Qwen3.5 for exactly one question/answer pair per row.
 - `uenv` and container build scaffolding for CSCS Bristen.
@@ -23,14 +24,17 @@ The recommended operating model is:
 - `src/gsdg/prefetch.py`: HuggingFace model and dataset cache prefetching.
 - `src/gsdg/generator.py`: main CLI entry point.
 - `src/gsdg/combine_jsonl.py`: JSONL combine utility with optional Q/A-based dedupe and row_id renumbering.
+- `src/gsdg/curate_jsonl.py`: incremental JSONL curation, quality filtering, classification, and de-duplication.
 - `scripts/generate_chatml.py`: script wrapper.
 - `scripts/prefetch_hf_assets.py`: cache prefetch script wrapper.
 - `scripts/combine_jsonl.py`: script wrapper for combining two or more JSONL outputs.
+- `scripts/curate_jsonl.py`: script wrapper for curating generated JSONL files.
 - `scripts/setup_uenv_python.sh`: build-time Python environment setup via `uenv`.
 - `scripts/build_container_on_alps.sh`: build and import the CE image on Alps.
 - `scripts/prefetch_hf_assets.sh`: Slurm job to warm model and dataset caches in `${SCRATCH}`.
 - `scripts/run_gsdg_qwen3.sh`: single-job Slurm example.
 - `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher for `Qwen/Qwen3.5-397B-A17B`, defaulting to the official FP8 checkpoint on the 397B path.
+- `scripts/run_curate_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher that starts the 397B API and runs the JSONL curation pass in the same allocation.
 - `smoke_test_32b.sh`: convenience wrapper for a 32B vLLM smoke test on Clariden.
 - `prefetch_32b.sh`: convenience wrapper to prefetch `Qwen/Qwen3-32B` weights.
 - `prefetch_datasets.sh`: convenience wrapper to prefetch one or more datasets.
@@ -143,6 +147,41 @@ Combine behavior summary:
 - With `--dedupe`, duplicates are removed only when the extracted `question` and `answer` are identical.
 - During combine, `meta.row_id` is renumbered sequentially (`0..N-1`) based on final output order (after dedupe).
 - `--out` must be different from every input path.
+
+## Curate existing JSONL outputs
+
+Use the curation tool on a generator-produced JSONL file when you want to filter low-quality Q/A pairs, classify accepted samples by topic, and keep a persistent resume/de-duplication state.
+
+Local or login-node usage expects an already-running OpenAI-compatible API if you want semantic review and topic classification from the model:
+
+```bash
+./run_uenv.sh python scripts/curate_jsonl.py \
+	outputs/combined_deduped_Wikisource_Greek_texts.jsonl \
+	--out-dir "${SCRATCH}/synthetics" \
+	--reject-log "${SCRATCH}/synthetics/rejects_wikisource.jsonl" \
+	--tokenizer-model Qwen/Qwen3.5-397B-A17B-FP8 \
+	--api-base http://localhost:8000/v1 \
+	--model Qwen/Qwen3.5-397B-A17B-FP8
+```
+
+Deterministic-only mode skips the LLM review stage and keeps only the rule-based filters:
+
+```bash
+./run_uenv.sh python scripts/curate_jsonl.py \
+	outputs/combined_deduped_Wikisource_Greek_texts.jsonl \
+	--out-dir "${SCRATCH}/synthetics" \
+	--reject-log "${SCRATCH}/synthetics/rejects_wikisource.jsonl" \
+	--tokenizer-model Qwen/Qwen3.5-397B-A17B-FP8 \
+	--disable-llm-review
+```
+
+Curation behavior summary:
+
+- Accepted samples are written into one file per category: `politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, `general.jsonl`.
+- Rejected samples can be logged with reason codes via `--reject-log`.
+- Resume state and the MinHash-LSH near-duplicate index are stored in a SQLite DB at `--state-db` or, by default, `${out_dir}/.curation_state.sqlite3`.
+- Re-running the same command continues from the highest processed `meta.source_row_index`, so it is safe to use when the source JSONL is still growing.
+- If `--tokenizer-model` is set, the tool uses the model tokenizer for context-window token counting; this requires `transformers` in `.venv-uenv`.
 
 ## Container build on Alps
 
@@ -313,6 +352,26 @@ See `Agents.md` for the full Bristen runbook and cluster-specific operational gu
 2. Copy `edf/qwen3_clariden.toml.example` to `~/.edf/qwen3-clariden.toml` and adjust the `image = ...` path if needed.
 3. For the validated 32B path, use the existing single-node wrappers.
 4. For the 397B path, use `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`, which now defaults to `Qwen/Qwen3.5-397B-A17B-FP8` on a 2-node Clariden allocation shape.
+
+To curate an existing generator-produced JSONL with the 397B model in the same Slurm allocation, submit the dedicated launcher:
+
+```bash
+export INPUT_JSONL=/users/p-skarvelis/GSDG/outputs/combined_deduped_Wikisource_Greek_texts.jsonl
+export CURATION_OUT_DIR=${SCRATCH}/synthetics
+export REJECT_LOG=${SCRATCH}/synthetics/rejects_wikisource.jsonl
+sbatch scripts/run_curate_qwen3_397b_clariden_multinode.sh
+```
+
+This launcher starts the Ray-backed 397B API, runs `scripts/curate_jsonl.py` on the head node, writes category outputs under `${CURATION_OUT_DIR}`, and keeps its resume/de-duplication state in `${CURATION_OUT_DIR}/.curation_state.sqlite3`. The input JSONL is snapshotted at job start, so if the source file is still growing you can submit the same job again later and the curation state will continue from the highest processed `source_row_index`.
+
+If you want only deterministic rules and no model review, submit with:
+
+```bash
+export INPUT_JSONL=/users/p-skarvelis/GSDG/outputs/combined_deduped_Wikisource_Greek_texts.jsonl
+export CURATION_OUT_DIR=${SCRATCH}/synthetics
+export DISABLE_LLM_REVIEW=1
+sbatch scripts/run_curate_qwen3_397b_clariden_multinode.sh
+```
 
 Current 397B Clariden status:
 

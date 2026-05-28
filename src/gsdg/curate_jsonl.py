@@ -45,6 +45,38 @@ LLM_REJECT_LABELS = (
     "REJECT_LOW_QUALITY",
 )
 
+CATEGORY_ALIASES = {
+    "philosophy": "general",
+    "philosophical": "general",
+    "φιλοσοφία": "general",
+    "φιλοσοφια": "general",
+    "general_knowledge": "general",
+    "γενικά": "general",
+    "γενικα": "general",
+    "πολιτική": "politics",
+    "πολιτικη": "politics",
+    "επιστήμη": "science",
+    "επιστημη": "science",
+    "ιατρική": "medicine",
+    "ιατρικη": "medicine",
+    "τεχνολογία": "technology",
+    "τεχνολογια": "technology",
+    "τέχνη": "art",
+    "τεχνη": "art",
+    "ιστορία": "history",
+    "ιστορια": "history",
+}
+
+REJECT_LABEL_ALIASES = {
+    "REJECT_LANGUAGE": "REJECT_LANGUAGE",
+    "LANGUAGE": "REJECT_LANGUAGE",
+    "REJECT_TEMPORAL": "REJECT_TEMPORAL",
+    "TEMPORAL": "REJECT_TEMPORAL",
+    "REJECT_LOW_QUALITY": "REJECT_LOW_QUALITY",
+    "LOW_QUALITY": "REJECT_LOW_QUALITY",
+    "LOWQUALITY": "REJECT_LOW_QUALITY",
+}
+
 LOW_INFORMATION_ANSWERS = {
     "ναι",
     "οχι",
@@ -568,20 +600,60 @@ class TokenCounter:
 def extract_json_object(raw_content: str) -> Dict[str, Any]:
     cleaned = THINK_TAG_PATTERN.sub("", raw_content).strip()
     match = JSON_OBJECT_PATTERN.search(cleaned)
-    if not match:
-        raise InferenceError(f"model did not return a JSON object: {cleaned}")
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            parsed = extract_partial_review_payload(cleaned)
+    else:
+        parsed = extract_partial_review_payload(cleaned)
 
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise InferenceError(f"failed to parse model JSON: {cleaned}") from exc
+    if parsed is None:
+        raise InferenceError(f"model did not return a JSON object: {cleaned}")
 
     if not isinstance(parsed, dict):
         raise InferenceError(f"model JSON must be an object: {parsed}")
     return parsed
 
 
-def build_review_prompt(question: str, answer: str) -> str:
+def extract_partial_review_payload(cleaned: str) -> Optional[Dict[str, Any]]:
+    decision_match = re.search(r'"decision"\s*:\s*"([^"\\]+)"', cleaned, re.IGNORECASE)
+    category_match = re.search(r'"category"\s*:\s*"([^"\\]+)"', cleaned, re.IGNORECASE)
+    labels_match = re.search(r'"reject_labels"\s*:\s*\[(.*?)\]', cleaned, re.DOTALL | re.IGNORECASE)
+    rationale_match = re.search(r'"rationale"\s*:\s*"((?:\\.|[^"\\])*)', cleaned, re.DOTALL | re.IGNORECASE)
+
+    if not decision_match or not category_match or not labels_match:
+        return None
+
+    labels = []
+    for raw_label in re.findall(r'"((?:\\.|[^"\\])*)"', labels_match.group(1)):
+        try:
+            labels.append(json.loads('"' + raw_label + '"'))
+        except json.JSONDecodeError:
+            labels.append(raw_label)
+
+    rationale = ""
+    if rationale_match:
+        raw_rationale = rationale_match.group(1)
+        try:
+            rationale = json.loads('"' + raw_rationale + '"')
+        except json.JSONDecodeError:
+            rationale = raw_rationale.replace('\\n', ' ').replace('\\"', '"').strip()
+
+    return {
+        "decision": decision_match.group(1),
+        "category": category_match.group(1),
+        "reject_labels": labels,
+        "rationale": rationale,
+    }
+
+
+def build_review_prompt(question: str, answer: str, strict: bool = False) -> str:
+    rationale_instruction = (
+        "Το rationale να έχει έως 12 λέξεις."
+        if strict
+        else "Το rationale να είναι σύντομη αιτιολόγηση στα Ελληνικά με έως 20 λέξεις."
+    )
     return (
         "Αξιολόγησε το παρακάτω ζεύγος Ερώτησης/Απάντησης για ελληνικό dataset fine-tuning.\n"
         "Κριτήρια απόρριψης:\n"
@@ -589,11 +661,65 @@ def build_review_prompt(question: str, answer: str) -> str:
         "2. REJECT_TEMPORAL: χρονικά εξαρτημένοι ισχυρισμοί που παρουσιάζονται ως σύγχρονα γεγονότα χωρίς χρονικό προσδιορισμό.\n"
         "3. REJECT_LOW_QUALITY: η απάντηση είναι επιφανειακή, άσχετη, ή δεν απαντά ουσιαστικά στην ερώτηση.\n"
         "Κατηγορίες: politics, science, medicine, technology, art, history, general.\n"
+        "Η τιμή του category ΠΡΕΠΕΙ να είναι ακριβώς μία από τις παραπάνω. Αν κάτι δεν ταιριάζει ακριβώς, χρησιμοποίησε general.\n"
         "Αν το δείγμα είναι αποδεκτό, επίλεξε decision=ACCEPT και reject_labels=[].\n"
-        "Απάντησε ΜΟΝΟ με JSON της μορφής:\n"
+        "Απάντησε ΜΟΝΟ με έγκυρο JSON σε μία γραμμή, χωρίς markdown ή άλλο κείμενο.\n"
+        f"{rationale_instruction}\n"
+        "JSON σχήμα:\n"
         '{"decision":"ACCEPT|REJECT","category":"politics|science|medicine|technology|art|history|general","reject_labels":["REJECT_LANGUAGE|REJECT_TEMPORAL|REJECT_LOW_QUALITY"],"rationale":"σύντομη αιτιολόγηση στα Ελληνικά"}\n\n'
         f"Ερώτηση:\n{question}\n\n"
         f"Απάντηση:\n{answer}"
+    )
+
+
+def normalize_review_category(category: str, question: str, answer: str) -> str:
+    normalized_category = normalize_text(category).casefold().replace(" ", "_")
+    if normalized_category in CATEGORY_NAMES:
+        return normalized_category
+    if normalized_category in CATEGORY_ALIASES:
+        return CATEGORY_ALIASES[normalized_category]
+    fallback_category = heuristic_category(question, answer)
+    LOGGER.warning(
+        "LLM returned unsupported category %r; falling back to %s",
+        category,
+        fallback_category,
+    )
+    return fallback_category
+
+
+def normalize_review_reject_labels(raw_labels: Any) -> List[str]:
+    if not isinstance(raw_labels, list):
+        raise InferenceError(f"invalid reject_labels payload: {raw_labels}")
+
+    cleaned_labels = []
+    for raw_label in raw_labels:
+        label = normalize_text(raw_label).upper().replace("-", "_").replace(" ", "_")
+        resolved_label = REJECT_LABEL_ALIASES.get(label)
+        if resolved_label is None:
+            LOGGER.warning("Ignoring unsupported review reject label %r", raw_label)
+            continue
+        cleaned_labels.append(resolved_label)
+    return list(dict.fromkeys(cleaned_labels))
+
+
+def parse_review_decision(parsed: Dict[str, Any], question: str, answer: str) -> ReviewDecision:
+    decision = normalize_text(parsed.get("decision", "")).upper()
+    category = normalize_review_category(parsed.get("category", ""), question, answer)
+    rationale = normalize_text(parsed.get("rationale", ""))
+
+    if decision not in {"ACCEPT", "REJECT"}:
+        raise InferenceError(f"invalid review decision: {parsed}")
+
+    cleaned_labels = normalize_review_reject_labels(parsed.get("reject_labels", []))
+    if decision == "REJECT" and not cleaned_labels:
+        cleaned_labels = ["REJECT_LOW_QUALITY"]
+
+    return ReviewDecision(
+        accept=decision == "ACCEPT",
+        category=category,
+        reject_labels=cleaned_labels,
+        rationale=rationale,
+        used_llm=True,
     )
 
 
@@ -604,41 +730,37 @@ def run_llm_review(
     review_max_tokens: int,
     review_temperature: float,
 ) -> ReviewDecision:
-    raw_response = client.create_chat_completion(
-        system_prompt=DEFAULT_REVIEW_SYSTEM_PROMPT,
-        user_prompt=build_review_prompt(question, answer),
-        temperature=review_temperature,
-        max_tokens=review_max_tokens,
-        enable_thinking=False,
-    )
-    parsed = extract_json_object(raw_response)
+    prompts = [
+        build_review_prompt(question, answer, strict=False),
+        build_review_prompt(question, answer, strict=True),
+    ]
+    last_error = None
 
-    decision = normalize_text(parsed.get("decision", "")).upper()
-    category = normalize_text(parsed.get("category", "")).lower()
-    reject_labels = parsed.get("reject_labels", [])
-    rationale = normalize_text(parsed.get("rationale", ""))
+    for user_prompt in prompts:
+        raw_response = client.create_chat_completion(
+            system_prompt=DEFAULT_REVIEW_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=review_temperature,
+            max_tokens=review_max_tokens,
+            enable_thinking=False,
+        )
 
-    if decision not in {"ACCEPT", "REJECT"}:
-        raise InferenceError(f"invalid review decision: {parsed}")
-    if category not in CATEGORY_NAMES:
-        raise InferenceError(f"invalid review category: {parsed}")
-    if not isinstance(reject_labels, list):
-        raise InferenceError(f"invalid reject_labels payload: {parsed}")
+        try:
+            parsed = extract_json_object(raw_response)
+            review = parse_review_decision(parsed, question, answer)
+            return ReviewDecision(
+                accept=review.accept,
+                category=review.category,
+                reject_labels=review.reject_labels,
+                rationale=review.rationale,
+                used_llm=True,
+            )
+        except InferenceError as exc:
+            last_error = exc
 
-    cleaned_labels = []
-    for raw_label in reject_labels:
-        label = normalize_text(raw_label).upper()
-        if label not in LLM_REJECT_LABELS:
-            raise InferenceError(f"invalid review reject label: {parsed}")
-        cleaned_labels.append(label)
-
-    return ReviewDecision(
-        accept=decision == "ACCEPT",
-        category=category,
-        reject_labels=list(dict.fromkeys(cleaned_labels)),
-        rationale=rationale,
-        used_llm=True,
-    )
+    if last_error is None:
+        raise InferenceError("LLM review failed without an explicit parser error")
+    raise last_error
 
 
 def sha256_text(text: str) -> str:
@@ -1100,14 +1222,29 @@ def run(args: argparse.Namespace) -> int:
                 continue
 
             if client is not None:
-                review = run_llm_review(
-                    client=client,
-                    question=sample.question,
-                    answer=sample.answer,
-                    review_max_tokens=args.review_max_tokens,
-                    review_temperature=args.review_temperature,
-                )
-                llm_reviewed += 1
+                try:
+                    review = run_llm_review(
+                        client=client,
+                        question=sample.question,
+                        answer=sample.answer,
+                        review_max_tokens=args.review_max_tokens,
+                        review_temperature=args.review_temperature,
+                    )
+                    llm_reviewed += 1
+                except InferenceError as exc:
+                    LOGGER.warning(
+                        "LLM review failed at line %s (source_row_index=%s); falling back to heuristic classification: %s",
+                        line_number,
+                        sample.source_row_index,
+                        exc,
+                    )
+                    review = ReviewDecision(
+                        accept=True,
+                        category=heuristic_category(sample.question, sample.answer),
+                        reject_labels=[],
+                        rationale="LLM review fallback after malformed output",
+                        used_llm=False,
+                    )
             else:
                 review = ReviewDecision(
                     accept=True,
