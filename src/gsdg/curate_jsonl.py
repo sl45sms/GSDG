@@ -36,6 +36,9 @@ CATEGORY_NAMES = (
     "technology",
     "art",
     "history",
+    "religion",
+    "education",
+    "philosophy",
     "general",
 )
 
@@ -46,10 +49,25 @@ LLM_REJECT_LABELS = (
 )
 
 CATEGORY_ALIASES = {
-    "philosophy": "general",
-    "philosophical": "general",
-    "φιλοσοφία": "general",
-    "φιλοσοφια": "general",
+    "philosophy": "philosophy",
+    "philosophical": "philosophy",
+    "φιλοσοφία": "philosophy",
+    "φιλοσοφια": "philosophy",
+    "religion": "religion",
+    "religious": "religion",
+    "theology": "religion",
+    "θεολογία": "religion",
+    "θεολογια": "religion",
+    "θρησκεία": "religion",
+    "θρησκεια": "religion",
+    "education": "education",
+    "educational": "education",
+    "pedagogy": "education",
+    "pedagogical": "education",
+    "εκπαίδευση": "education",
+    "εκπαιδευση": "education",
+    "παιδεία": "education",
+    "παιδεια": "education",
     "general_knowledge": "general",
     "γενικά": "general",
     "γενικα": "general",
@@ -65,6 +83,8 @@ CATEGORY_ALIASES = {
     "τεχνη": "art",
     "ιστορία": "history",
     "ιστορια": "history",
+    "religion_and_belief": "religion",
+    "education_and_pedagogy": "education",
 }
 
 REJECT_LABEL_ALIASES = {
@@ -222,6 +242,65 @@ CATEGORY_KEYWORDS = {
         "αυτοκρατ",
         "βασιλ",
         "χρονολογ",
+    ),
+    "religion": (
+        "θρησκ",
+        "θεολογ",
+        "εκκλησ",
+        "μοναχ",
+        "μοναστ",
+        "πίστ",
+        "πιστ",
+        "χριστιαν",
+        "ισλάμ",
+        "ισλαμ",
+        "κοράν",
+        "κοραν",
+        "βίβλ",
+        "βιβλ",
+        "ευαγγέλ",
+        "ευαγγελ",
+        "δογμ",
+        "λατρ",
+    ),
+    "education": (
+        "εκπαιδ",
+        "παιδαγωγ",
+        "σχολ",
+        "μαθητ",
+        "διδασκ",
+        "διδασκαλ",
+        "πανεπιστημ",
+        "καθηγητ",
+        "μάθημ",
+        "μαθημ",
+        "μάθηση",
+        "μαθηση",
+        "πρόγραμμα σπουδ",
+        "προγραμμα σπουδ",
+        "τάξ",
+        "ταξ",
+    ),
+    "philosophy": (
+        "φιλοσοφ",
+        "οντολογ",
+        "γνωσιολογ",
+        "μεταφυσ",
+        "ηθικ",
+        "λογικ",
+        "αριστοτέλ",
+        "αριστοτελ",
+        "πλάτων",
+        "πλατων",
+        "σωκράτ",
+        "σωκρατ",
+        "υπαρξ",
+        "νουσ",
+        "ψυχ",
+        "είναι",
+        "ειναι",
+        "συνείδησ",
+        "συνειδησ",
     ),
 }
 
@@ -660,13 +739,13 @@ def build_review_prompt(question: str, answer: str, strict: bool = False) -> str
         "1. REJECT_LANGUAGE: μη φυσικά, λανθασμένα ή κακής ποιότητας Ελληνικά, ή έντονα machine-translation artifacts.\n"
         "2. REJECT_TEMPORAL: χρονικά εξαρτημένοι ισχυρισμοί που παρουσιάζονται ως σύγχρονα γεγονότα χωρίς χρονικό προσδιορισμό.\n"
         "3. REJECT_LOW_QUALITY: η απάντηση είναι επιφανειακή, άσχετη, ή δεν απαντά ουσιαστικά στην ερώτηση.\n"
-        "Κατηγορίες: politics, science, medicine, technology, art, history, general.\n"
+        "Κατηγορίες: politics, science, medicine, technology, art, history, religion, education, philosophy, general.\n"
         "Η τιμή του category ΠΡΕΠΕΙ να είναι ακριβώς μία από τις παραπάνω. Αν κάτι δεν ταιριάζει ακριβώς, χρησιμοποίησε general.\n"
         "Αν το δείγμα είναι αποδεκτό, επίλεξε decision=ACCEPT και reject_labels=[].\n"
         "Απάντησε ΜΟΝΟ με έγκυρο JSON σε μία γραμμή, χωρίς markdown ή άλλο κείμενο.\n"
         f"{rationale_instruction}\n"
         "JSON σχήμα:\n"
-        '{"decision":"ACCEPT|REJECT","category":"politics|science|medicine|technology|art|history|general","reject_labels":["REJECT_LANGUAGE|REJECT_TEMPORAL|REJECT_LOW_QUALITY"],"rationale":"σύντομη αιτιολόγηση στα Ελληνικά"}\n\n'
+        '{"decision":"ACCEPT|REJECT","category":"politics|science|medicine|technology|art|history|religion|education|philosophy|general","reject_labels":["REJECT_LANGUAGE|REJECT_TEMPORAL|REJECT_LOW_QUALITY"],"rationale":"σύντομη αιτιολόγηση στα Ελληνικά"}\n\n'
         f"Ερώτηση:\n{question}\n\n"
         f"Απάντηση:\n{answer}"
     )
