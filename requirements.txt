@@ -1,5 +1,7 @@
+aiohttp>=3.9.0
 datasets>=3.0.0
 huggingface_hub>=0.29.0
+orjson>=3.9.0
 requests>=2.32.0
 tqdm>=4.66.0
 transformers>=4.51.0
