@@ -76,23 +76,83 @@ class OpenAICompatibleClient:
             raise InferenceError(f"unexpected response payload: {payload}") from exc
 
 
+# ---------------------------------------------------------------------------
+# Robust JSON helpers
+# ---------------------------------------------------------------------------
+
+# LaTeX commands like \frac, \det, \Delta — the model often emits a single
+# backslash, which is illegal in JSON (e.g. \f is the form-feed escape).
+_LATEX_BSLASH_RE = re.compile(r"(?<!\\)\\([a-zA-Z]+)")
+
+
+def _maybe_fix_latex_backslashes(text: str) -> str:
+    """Escape lone backslashes that precede letters (LaTeX commands)."""
+    return _LATEX_BSLASH_RE.sub(lambda m: "\\\\" + m.group(1), text)
+
+
+# Lines that start a JSON string value may contain unescaped double-quotes
+# inside Greek-guillemet quotations:  «"Foo": bar»
+# Strategy: after the first ":"  (the JSON key-value separator), scan for
+# «...» spans and backslash-escape every " found inside them.
+_GUILLEMET_SPAN_RE = re.compile(r"\u00ab.*?\u00bb", re.DOTALL)
+
+
+def _escape_quotes_in_guillemets(text: str) -> str:
+    """Backslash-escape every double-quote inside \u00ab...\u00bb spans."""
+
+    def _fix_span(m: re.Match) -> str:
+        return m.group(0).replace('"', '\\"')
+
+    return _GUILLEMET_SPAN_RE.sub(_fix_span, text)
+
+
+def _robust_parse_json_object(json_text: str) -> Dict[str, Any]:
+    """Try to parse *json_text* as a JSON object, applying fix-ups on failure."""
+    # Strategy 1 – raw parse
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2 – escape LaTeX backslashes
+    try:
+        return json.loads(_maybe_fix_latex_backslashes(json_text))
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 3 – fix unescaped quotes inside «...», then LaTeX, then parse
+    try:
+        fixed = _escape_quotes_in_guillemets(json_text)
+        fixed = _maybe_fix_latex_backslashes(fixed)
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 4 – combine both in opposite order
+    try:
+        fixed = _maybe_fix_latex_backslashes(json_text)
+        fixed = _escape_quotes_in_guillemets(fixed)
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    raise InferenceError(f"failed to parse model JSON after fix-ups: {json_text[:500]}")
+
+
 def parse_qa_json(raw_content: str) -> Dict[str, Any]:
     cleaned = THINK_TAG_PATTERN.sub("", raw_content).strip()
     match = JSON_OBJECT_PATTERN.search(cleaned)
     if not match:
-        raise InferenceError(f"model did not return a JSON object: {cleaned}")
+        raise InferenceError(f"model did not return a JSON object: {cleaned[:500]}")
 
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise InferenceError(f"failed to parse model JSON: {cleaned}") from exc
+    parsed = _robust_parse_json_object(match.group(0))
 
     question = parsed.get("question")
     answer = parsed.get("answer")
     if not isinstance(question, str) or not question.strip():
-        raise InferenceError(f"missing question in model output: {parsed}")
+        raise InferenceError(f"missing question in model output: {str(parsed)[:200]}")
     if not isinstance(answer, str) or not answer.strip():
-        raise InferenceError(f"missing answer in model output: {parsed}")
+        raise InferenceError(f"missing answer in model output: {str(parsed)[:200]}")
 
     return {
         "question": question.strip(),

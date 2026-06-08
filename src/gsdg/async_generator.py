@@ -44,7 +44,28 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Per-row async worker
+# Transient-error detection (for retry logic)
+# ---------------------------------------------------------------------------
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds, doubled each attempt
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """Return True for network errors worth retrying."""
+    if isinstance(exc, (aiohttp.ServerDisconnectedError,
+                         aiohttp.ClientConnectorError,
+                         aiohttp.ClientOSError,
+                         asyncio.TimeoutError)):
+        return True
+    # aiohttp.ClientResponseError with 5xx status
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return 500 <= exc.status < 600
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Per-row async worker (with retries)
 # ---------------------------------------------------------------------------
 
 async def _process_one_row(
@@ -58,55 +79,74 @@ async def _process_one_row(
     max_tokens: int,
     enable_thinking: bool,
 ) -> Tuple[int, Optional[dict]]:
-    """Extract text, call the API, parse, and return a ChatML record (or None).
+    """Extract text, call the API (with retries), parse, build a ChatML record.
 
-    The *semaphore* bounds the number of simultaneous in-flight requests so
-    we do not overwhelm the server or local networking.
+    The *semaphore* is held only during the API call so CPU work (text
+    extraction, JSON serialisation) does not consume a concurrency slot.
     """
+
+    # -- text extraction (cpu-only, fast — OUTSIDE semaphore) --------------
+    try:
+        source_fields, source_text = extract_best_text(row, max_source_chars)
+    except ValueError:
+        LOGGER.warning("Skipping row %s: no usable text fields", row_index)
+        return (row_index, None)
+
+    row_id = infer_row_id(row, row_index)
+    user_prompt = build_user_prompt(source_text)
+
+    # -- inference with retry (INSIDE semaphore) ---------------------------
+    last_exc: Optional[BaseException] = None
+    raw: Optional[str] = None
+
     async with semaphore:
-        # -- text extraction (cpu-only, very fast) --------------------------
-        try:
-            source_fields, source_text = extract_best_text(row, max_source_chars)
-        except ValueError:
-            LOGGER.warning("Skipping row %s: no usable text fields", row_index)
-            return (row_index, None)
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                raw = await client.create_chat_completion(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    enable_thinking=enable_thinking,
+                )
+                break  # success
+            except InferenceError:
+                raise  # non-retryable — bad model output
+            except Exception as exc:
+                last_exc = exc
+                if not _is_transient_error(exc) or attempt == _MAX_RETRIES:
+                    raise
+                delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                LOGGER.debug(
+                    "Row %s attempt %s/%s failed (%s), retrying in %.1fs",
+                    row_index, attempt, _MAX_RETRIES, exc, delay,
+                )
+                await asyncio.sleep(delay)
 
-        row_id = infer_row_id(row, row_index)
-        user_prompt = build_user_prompt(source_text)
+    # If we get here without raw, all retries were exhausted
+    if raw is None:
+        if last_exc is not None:
+            raise last_exc
+        return (row_index, None)
 
-        # -- inference ------------------------------------------------------
-        try:
-            raw = await client.create_chat_completion(
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                enable_thinking=enable_thinking,
-            )
-            qa_pair = parse_qa_json(raw)
-        except InferenceError as exc:
-            LOGGER.warning(
-                "Skipping row %s after inference error: %s", row_index, exc
-            )
-            return (row_index, None)
-        except Exception:
-            LOGGER.exception(
-                "Skipping row %s after unexpected inference error", row_index
-            )
-            return (row_index, None)
+    # -- parse & assemble (cpu-only, OUTSIDE semaphore) --------------------
+    try:
+        qa_pair = parse_qa_json(raw)
+    except InferenceError as exc:
+        LOGGER.warning("Skipping row %s after inference error: %s", row_index, exc)
+        return (row_index, None)
 
-        # -- assemble record ------------------------------------------------
-        record = build_chatml_record(
-            user_prompt=user_prompt,
-            question=qa_pair["question"],
-            answer=qa_pair["answer"],
-            dataset_name=source_label,
-            split_name="train",  # parquet inputs always use "train" split
-            row_id=row_id,
-            source_row_index=row_index,
-            source_fields=source_fields,
-        )
-        return (row_index, record)
+    record = build_chatml_record(
+        user_prompt=user_prompt,
+        question=qa_pair["question"],
+        answer=qa_pair["answer"],
+        dataset_name=source_label,
+        split_name="train",
+        row_id=row_id,
+        source_row_index=row_index,
+        source_fields=source_fields,
+    )
+    return (row_index, record)
 
 
 # ---------------------------------------------------------------------------
@@ -271,30 +311,53 @@ async def _flush_batch(
     args,
     fh,
 ) -> Tuple[int, int]:
-    """Fire every row in *batch_rows* concurrently, sort by row_index, write."""
-    tasks = [
-        _process_one_row(
-            row_index=idx,
-            row=row,
-            client=client,
-            semaphore=semaphore,
-            source_label=source_label,
-            max_source_chars=args.max_source_chars,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            enable_thinking=args.enable_thinking,
-        )
-        for idx, row in batch_rows
-    ]
+    """Process *batch_rows* in chunks of ``args.concurrency``.
 
-    results = await asyncio.gather(*tasks)
+    Processing one chunk at a time (instead of firing the whole batch in a
+    single ``asyncio.gather``) avoids a connection-establishment storm that
+    can cause ``ServerDisconnectedError`` at batch boundaries.
+    """
+    chunk_size = max(args.concurrency, 1)
+    all_results: List[Tuple[int, Optional[dict]]] = []
+
+    for chunk_start in range(0, len(batch_rows), chunk_size):
+        chunk = batch_rows[chunk_start : chunk_start + chunk_size]
+
+        tasks = [
+            _process_one_row(
+                row_index=idx,
+                row=row,
+                client=client,
+                semaphore=semaphore,
+                source_label=source_label,
+                max_source_chars=args.max_source_chars,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                enable_thinking=args.enable_thinking,
+            )
+            for idx, row in chunk
+        ]
+
+        # return_exceptions=True so one crashing row doesn't kill the chunk.
+        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, result in enumerate(chunk_results):
+            if isinstance(result, Exception):
+                idx, _ = chunk[i]
+                LOGGER.warning(
+                    "Row %s failed after %s retries: %s",
+                    idx, _MAX_RETRIES, result,
+                )
+                all_results.append((idx, None))
+            else:
+                all_results.append(result)
 
     # Sort so the output file stays ordered by row_index.
-    results.sort(key=lambda r: r[0])
+    all_results.sort(key=lambda r: r[0])
 
     written = 0
     skipped = 0
-    for _, record in results:
+    for _, record in all_results:
         if record is None:
             skipped += 1
             continue
