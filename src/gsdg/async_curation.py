@@ -14,13 +14,21 @@ held in memory at any point.  This means memory usage is O(batch_size +
 concurrency), not O(total rows), and very large curation files are handled
 without issue.
 
+**Dedup runs before the LLM review** so exact- and near-duplicate samples
+are skipped without spending GPU compute.  A second dedup check after the
+LLM review catches any sample that became a near-duplicate while the review
+was in-flight (rare).
+
 Differences from the synchronous ``curate_jsonl.py``:
 - Reads the JSONL once, streaming; never loads the full file into a list.
 - Deterministic checks run inline per-row; rejects are written immediately.
-- Rows that pass deterministic checks are queued and, once a batch fills,
-  reviewed concurrently under an asyncio.Semaphore.
-- Dedup + write + checkpoint are serialised behind a single asyncio.Lock.
-- Progress is reported per batch, not per row.
+- Exact- and near-duplicate checks run *before* LLM review, saving GPU time.
+- Rows that pass dedup are queued and, once a batch fills, reviewed
+  concurrently under an asyncio.Semaphore.
+- Dedup recheck + write + checkpoint are serialised behind a single
+  asyncio.Lock.
+- Progress is reported per batch with a breakdown of skip reasons
+  (exact dup, near dup, error).
 """
 
 import asyncio
@@ -173,12 +181,51 @@ async def _process_one_sample(
     reject_log_path: Optional[Path],
     output_directory: Path,
 ) -> Tuple[str, Optional[str]]:
-    """LLM review → dedup → write for a single sample.
+    """Dedup → LLM review → dedup-recheck → write for a single sample.
+
+    Exact- and near-duplicate checks run **before** the LLM review so
+    duplicate samples are skipped without wasting GPU compute.  A second
+    dedup pass after the LLM review catches any sample that became a
+    near-duplicate while the review was in-flight (rare).
 
     Returns ``(status, None)`` where *status* is one of
-    ``"accepted"``, ``"rejected"``, or ``"skipped"``.
+    ``"accepted"``, ``"rejected"``, ``"skipped_exact"``, ``"skipped_near"``,
+    or ``"skipped_error"``.
     """
-    # --- LLM review (async, inside semaphore) ---------------------------
+    input_path = Path(getattr(args, "input", ""))
+
+    # ------------------------------------------------------------------
+    # Phase A — fast dedup (exact + near) BEFORE any network call
+    # ------------------------------------------------------------------
+    normalized_text = build_dedupe_text(sample.question, sample.answer)
+    text_hash = sha256_text(normalized_text)
+
+    async with dedup_lock:
+        if store.has_exact_duplicate(text_hash):
+            store.update_checkpoint(input_path, sample.source_row_index, sample.line_number)
+            store.connection.commit()
+            LOGGER.debug(
+                "Line %s (src_row=%s): exact duplicate — skipped",
+                sample.line_number,
+                sample.source_row_index,
+            )
+            return ("skipped_exact", None)
+
+        near_duplicate = store.find_near_duplicate(normalized_text)
+        if near_duplicate is not None:
+            store.update_checkpoint(input_path, sample.source_row_index, sample.line_number)
+            store.connection.commit()
+            LOGGER.debug(
+                "Line %s (src_row=%s): near-duplicate of sample_id %s — skipped",
+                sample.line_number,
+                sample.source_row_index,
+                near_duplicate["id"],
+            )
+            return ("skipped_near", None)
+
+    # ------------------------------------------------------------------
+    # Phase B — LLM review (only for genuinely new content)
+    # ------------------------------------------------------------------
     if client is not None:
         try:
             review = await _run_llm_review_async(
@@ -213,7 +260,9 @@ async def _process_one_sample(
             used_llm=False,
         )
 
-    # --- dedup + write (serialised via lock) ----------------------------
+    # ------------------------------------------------------------------
+    # Phase C — commit (reject log, dedup recheck, write output)
+    # ------------------------------------------------------------------
     async with dedup_lock:
         if not review.accept:
             write_reject_log(
@@ -223,35 +272,29 @@ async def _process_one_sample(
                 rationale=review.rationale,
                 used_llm=review.used_llm,
             )
-            store.update_checkpoint(
-                Path(getattr(args, "input", "")),
-                sample.source_row_index,
-                sample.line_number,
-            )
+            store.update_checkpoint(input_path, sample.source_row_index, sample.line_number)
             store.connection.commit()
             return ("rejected", None)
 
-        normalized_text = build_dedupe_text(sample.question, sample.answer)
-        text_hash = sha256_text(normalized_text)
-
+        # Re-check dedup — another coroutine may have added a near-duplicate
+        # while this sample's LLM review was in-flight.
         if store.has_exact_duplicate(text_hash):
-            store.update_checkpoint(
-                Path(getattr(args, "input", "")),
-                sample.source_row_index,
-                sample.line_number,
-            )
+            store.update_checkpoint(input_path, sample.source_row_index, sample.line_number)
             store.connection.commit()
-            return ("skipped", None)
+            return ("skipped_exact", None)
 
         near_duplicate = store.find_near_duplicate(normalized_text)
         if near_duplicate is not None:
-            store.update_checkpoint(
-                Path(getattr(args, "input", "")),
-                sample.source_row_index,
-                sample.line_number,
-            )
+            store.update_checkpoint(input_path, sample.source_row_index, sample.line_number)
             store.connection.commit()
-            return ("skipped", None)
+            LOGGER.debug(
+                "Line %s (src_row=%s): became near-duplicate of sample_id %s "
+                "during LLM review — skipped",
+                sample.line_number,
+                sample.source_row_index,
+                near_duplicate["id"],
+            )
+            return ("skipped_near", None)
 
         output_path = output_directory / f"{review.category}.jsonl"
         append_jsonl_line(output_path, sample.record)
@@ -260,14 +303,10 @@ async def _process_one_sample(
             text_hash=text_hash,
             category=review.category,
             source_row_index=sample.source_row_index,
-            input_path=Path(getattr(args, "input", "")),
+            input_path=input_path,
             output_path=output_path,
         )
-        store.update_checkpoint(
-            Path(getattr(args, "input", "")),
-            sample.source_row_index,
-            sample.line_number,
-        )
+        store.update_checkpoint(input_path, sample.source_row_index, sample.line_number)
         store.connection.commit()
 
     return ("accepted", None)
@@ -288,10 +327,10 @@ async def _flush_curation_batch(
     output_directory: Path,
     input_path: Path,
     args: object,
-) -> Tuple[int, int, int]:
-    """Run concurrent LLM reviews for *batch*, then dedup + write each result.
+) -> Tuple[int, int, int, int, int]:
+    """Run concurrent processing for *batch*.
 
-    Returns ``(accepted, rejected, skipped)`` counts for this batch.
+    Returns ``(accepted, rejected, skipped_exact, skipped_near, skipped_error)``.
     """
     tasks = [
         _process_one_sample(
@@ -310,7 +349,9 @@ async def _flush_curation_batch(
     # return_exceptions=True so one crashing sample doesn't kill the batch.
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    accepted = rejected = skipped = 0
+    accepted = rejected = 0
+    skipped_exact = skipped_near = skipped_error = 0
+
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             LOGGER.error(
@@ -318,7 +359,7 @@ async def _flush_curation_batch(
                 batch[i].line_number,
                 result,
             )
-            skipped += 1
+            skipped_error += 1
             store.update_checkpoint(
                 input_path,
                 batch[i].source_row_index,
@@ -331,10 +372,14 @@ async def _flush_curation_batch(
                 accepted += 1
             elif status == "rejected":
                 rejected += 1
-            elif status == "skipped":
-                skipped += 1
+            elif status == "skipped_exact":
+                skipped_exact += 1
+            elif status == "skipped_near":
+                skipped_near += 1
+            else:
+                skipped_error += 1
 
-    return accepted, rejected, skipped
+    return accepted, rejected, skipped_exact, skipped_near, skipped_error
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +464,10 @@ async def run_async(args) -> int:  # args: argparse.Namespace
         accepted = 0
         rejected_deterministic = 0
         rejected_llm = 0
-        skipped = 0
+        skipped_exact = 0
+        skipped_near = 0
+        skipped_error = 0
+        skipped_no_qa = 0
         rows_seen = 0
         rows_skipped_checkpoint = 0
         total_start = time.monotonic()
@@ -430,7 +478,7 @@ async def run_async(args) -> int:  # args: argparse.Namespace
 
             sample = build_sample(record, line_number)
             if sample is None:
-                skipped += 1
+                skipped_no_qa += 1
                 store.update_checkpoint(input_path, None, line_number)
                 store.connection.commit()
                 LOGGER.warning(
@@ -467,11 +515,11 @@ async def run_async(args) -> int:  # args: argparse.Namespace
                 rejected_deterministic += 1
                 continue
 
-            # -- queue for concurrent LLM review --------------------------
+            # -- queue for concurrent processing --------------------------
             pending_batch.append(sample)
 
             if len(pending_batch) >= batch_size:
-                a, r, s = await _flush_curation_batch(
+                a, r, se, sn, serr = await _flush_curation_batch(
                     batch=pending_batch,
                     client=client,
                     semaphore=semaphore,
@@ -484,23 +532,29 @@ async def run_async(args) -> int:  # args: argparse.Namespace
                 )
                 accepted += a
                 rejected_llm += r
-                skipped += s
+                skipped_exact += se
+                skipped_near += sn
+                skipped_error += serr
 
                 # -- progress ---------------------------------------------
                 now = time.monotonic()
                 batch_elapsed = now - batch_start
                 total_elapsed = now - total_start
-                done = accepted + rejected_llm + rejected_deterministic + skipped
+                total_skipped = skipped_exact + skipped_near + skipped_error + skipped_no_qa
+                done = accepted + rejected_llm + rejected_deterministic + total_skipped
                 rate = done / total_elapsed if total_elapsed > 0 else 0.0
                 LOGGER.info(
-                    "rows %s-%s  accepted=%s  rej_det=%s  rej_llm=%s  skip=%s  "
+                    "rows %s-%s  accepted=%s  rej_det=%s  rej_llm=%s  "
+                    "skip_exact=%s  skip_near=%s  skip_err=%s  "
                     "batch_t=%.1fs  total_done=%s  rate=%.1f row/s",
                     pending_batch[0].line_number,
                     pending_batch[-1].line_number,
                     a,
                     rejected_deterministic,
                     r,
-                    s,
+                    se,
+                    sn,
+                    serr,
                     batch_elapsed,
                     done,
                     rate,
@@ -510,7 +564,7 @@ async def run_async(args) -> int:  # args: argparse.Namespace
 
         # -- final (partial) batch ------------------------------------------
         if pending_batch:
-            a, r, s = await _flush_curation_batch(
+            a, r, se, sn, serr = await _flush_curation_batch(
                 batch=pending_batch,
                 client=client,
                 semaphore=semaphore,
@@ -523,12 +577,15 @@ async def run_async(args) -> int:  # args: argparse.Namespace
             )
             accepted += a
             rejected_llm += r
-            skipped += s
+            skipped_exact += se
+            skipped_near += sn
+            skipped_error += serr
 
     # ------------------------------------------------------------------
     # Phase 4 — summary
     # ------------------------------------------------------------------
     total_rejected = rejected_deterministic + rejected_llm
+    total_skipped = skipped_exact + skipped_near + skipped_error + skipped_no_qa
     summary_path = output_directory / ".curation_summary.json"
     last_src, last_ln = store.load_checkpoint(input_path)
     atomic_write_json(
@@ -538,7 +595,10 @@ async def run_async(args) -> int:  # args: argparse.Namespace
             "rejected": total_rejected,
             "rejected_deterministic": rejected_deterministic,
             "rejected_llm": rejected_llm,
-            "skipped": skipped,
+            "skipped_exact": skipped_exact,
+            "skipped_near": skipped_near,
+            "skipped_error": skipped_error,
+            "skipped_no_qa": skipped_no_qa,
             "rows_seen": rows_seen,
             "rows_skipped_checkpoint": rows_skipped_checkpoint,
             "input": str(input_path.resolve()),
@@ -554,12 +614,17 @@ async def run_async(args) -> int:  # args: argparse.Namespace
     total_elapsed = time.monotonic() - total_start
     LOGGER.info(
         "Finished async curation: accepted=%s rejected=%s (deterministic=%s llm=%s) "
-        "skipped=%s rows_seen=%s elapsed=%.1fs out_dir=%s",
+        "skipped=%s (exact=%s near=%s err=%s no_qa=%s) "
+        "rows_seen=%s elapsed=%.1fs out_dir=%s",
         accepted,
         total_rejected,
         rejected_deterministic,
         rejected_llm,
-        skipped,
+        total_skipped,
+        skipped_exact,
+        skipped_near,
+        skipped_error,
+        skipped_no_qa,
         rows_seen,
         total_elapsed,
         output_directory,
