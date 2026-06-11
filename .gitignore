@@ -21,3 +21,4 @@ core_clariden-*
 *.count
 .venv-uenv
 runsteps.md
+trash
