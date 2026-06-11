@@ -9,39 +9,59 @@ The recommended operating model is:
 
 ## What is implemented
 
-- A Python CLI that loads either a HuggingFace dataset split or selected parquet files from a Hugging Face dataset repo or the local filesystem, extracts the best text payload from each row, calls an OpenAI-compatible inference endpoint, and writes ChatML records.
-- A Python CLI that curates existing generated JSONL files, applies deterministic quality filters, optionally asks the model for semantic review/classification, and writes accepted samples into category-specific JSONL files.
+- A synchronous Python CLI that loads either a HuggingFace dataset split or selected parquet files from a Hugging Face dataset repo or the local filesystem, extracts the best text payload from each row, calls an OpenAI-compatible inference endpoint, and writes ChatML records.
+- An async Python CLI (`scripts/generate_chatml_async.py`) with configurable concurrency and batch size, using `aiohttp` for 50–80× higher throughput while preserving row-order output and resumability.
+- A synchronous Python CLI that curates existing generated JSONL files, applies deterministic quality filters, optionally asks the model for semantic review/classification, and writes accepted samples into category-specific JSONL files. Includes MinHash-LSH near-duplicate detection via a SQLite-backed deduplication store.
+- An async Python CLI (`scripts/curate_jsonl_async.py`) that streams the input JSONL, runs LLM reviews concurrently, and runs dedup before the LLM review to save GPU compute.
 - Text extraction heuristics for heterogeneous GlossAPI schemas.
 - A strict Greek prompt template that asks Qwen3.5 for exactly one question/answer pair per row.
-- `uenv` and container build scaffolding for CSCS Bristen.
-- Container and Slurm runtime scaffolding for running the workflow on CSCS Bristen and Clariden.
+- Robust JSON parsing with fix-ups for LaTeX backslashes and unescaped quotes inside Greek guillemets.
+- A JSONL combine utility with optional Q/A-based deduplication and sequential `row_id` renumbering.
+- `uenv` and container build scaffolding for CSCS Bristen and Clariden.
+- Container and Slurm runtime scaffolding for running the workflow on CSCS Bristen and Clariden, including a Ray-backed multi-node vLLM launcher for the 397B model on Clariden.
 
 ## Repository layout
 
 - `src/gsdg/text_extraction.py`: row-to-text selection heuristics.
 - `src/gsdg/prompting.py`: Greek prompt and ChatML record construction.
-- `src/gsdg/openai_client.py`: local OpenAI-compatible API client and JSON parsing.
+- `src/gsdg/openai_client.py`: synchronous OpenAI-compatible API client and robust JSON parsing.
+- `src/gsdg/async_client.py`: async OpenAI-compatible API client built on `aiohttp` (shared by async generator and async curation).
 - `src/gsdg/prefetch.py`: HuggingFace model and dataset cache prefetching.
-- `src/gsdg/generator.py`: main CLI entry point.
-- `src/gsdg/combine_jsonl.py`: JSONL combine utility with optional Q/A-based dedupe and row_id renumbering.
-- `src/gsdg/curate_jsonl.py`: incremental JSONL curation, quality filtering, classification, and de-duplication.
-- `scripts/generate_chatml.py`: script wrapper.
+- `src/gsdg/generator.py`: synchronous CLI entry point for ChatML Q/A generation.
+- `src/gsdg/async_generator.py`: async batch generator with configurable concurrency for higher throughput.
+- `src/gsdg/combine_jsonl.py`: JSONL combine utility with optional Q/A-based dedupe and `row_id` renumbering.
+- `src/gsdg/curate_jsonl.py`: synchronous incremental JSONL curation, quality filtering, MinHash-LSH near-deduplication, LLM review, and topic classification.
+- `src/gsdg/async_curation.py`: async streaming curation with concurrent LLM reviews and streaming input (never loads full JSONL into memory).
+- `scripts/generate_chatml.py`: script wrapper for the synchronous generator.
+- `scripts/generate_chatml_async.py`: script wrapper for the async generator (adds `--concurrency` and `--batch-size`).
 - `scripts/prefetch_hf_assets.py`: cache prefetch script wrapper.
 - `scripts/combine_jsonl.py`: script wrapper for combining two or more JSONL outputs.
-- `scripts/curate_jsonl.py`: script wrapper for curating generated JSONL files.
+- `scripts/curate_jsonl.py`: script wrapper for synchronous curation.
+- `scripts/curate_jsonl_async.py`: script wrapper for async curation (adds `--curation-concurrency` and `--curation-batch-size`).
+- `scripts/launch_vllm_serve_with_ray.py`: Ray-backed multi-node vLLM serve launcher for Clariden 397B jobs.
+- `scripts/install_qwen35_gdn_sitecustomize.py`: GDN-native prefill fallback for older Clariden images without FlashInfer.
 - `scripts/setup_uenv_python.sh`: build-time Python environment setup via `uenv`.
 - `scripts/build_container_on_alps.sh`: build and import the CE image on Alps.
+- `scripts/build_clariden_vllm_src_image.sh`: alternative Clariden-native image build (rootfs + mksquashfs).
 - `scripts/prefetch_hf_assets.sh`: Slurm job to warm model and dataset caches in `${SCRATCH}`.
-- `scripts/run_gsdg_qwen3.sh`: single-job Slurm example.
-- `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher for `Qwen/Qwen3.5-397B-A17B`, defaulting to the official FP8 checkpoint on the 397B path.
-- `scripts/run_curate_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher that starts the 397B API and runs the JSONL curation pass in the same allocation.
-- `smoke_test_32b.sh`: convenience wrapper for a 32B vLLM smoke test on Clariden.
+- `scripts/run_gsdg_qwen3.sh`: single-job Slurm example (single-node, auto-selects Bristen or Clariden).
+- `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher for Qwen3.5-397B (Ray-backed, defaults to FP8).
+- `scripts/run_gsdg_qwen3_397b_clariden_multinode_parallel.sh`: parallel multi-node Clariden launcher variant.
+- `scripts/run_gsdg_qwen3_397b_clariden_async.sh`: async generator launcher for 397B on Clariden.
+- `scripts/run_gsdg_bristen_small_qwen3.sh`: single-node Bristen launcher for small Qwen3 models.
+- `scripts/run_curate_qwen3_397b_clariden_multinode.sh`: multi-node Clariden launcher for curation with the 397B API.
+- `scripts/run_curate_qwen3_397b_clariden_async.sh`: async curation launcher for 397B on Clariden.
+- `scripts/smoke_test_vllm_qwen3.sh`: lightweight vLLM smoke-test Slurm script.
+- `scripts/helpers/`: convenience wrappers that submit the scripts above with sensible defaults.
+- `run_uenv.sh`: default uenv entry point — activates the repo venv, sets `PYTHONPATH`, loads `.env`, and runs the given command.
 - `prefetch_32b.sh`: convenience wrapper to prefetch `Qwen/Qwen3-32B` weights.
 - `prefetch_datasets.sh`: convenience wrapper to prefetch one or more datasets.
-- `run_single_dataset_32b.sh`: convenience wrapper for a full run on `glossAPI/Sxolika_vivlia`.
-- `edf/qwen3.toml.example`: CE environment template.
+- `prefetch_parquet_repo.sh`: convenience wrapper to prefetch parquet files from a HuggingFace dataset repo using `uenv`.
+- `smoke_test_32b.sh` → `scripts/helpers/smoke_test_32b.sh`: convenience wrapper for a 32B vLLM smoke test on Clariden.
+- `run_single_dataset_32b.sh` → `scripts/helpers/run_single_dataset_32b.sh`: convenience wrapper for a full run on `glossAPI/Sxolika_vivlia`.
+- `edf/qwen3.toml.example`: CE environment template (Bristen / x86_64).
 - `edf/qwen3_clariden.toml.example`: CE environment template for Clariden (GH200 / aarch64).
-- `Containerfile`: container build recipe.
+- `Containerfile`: container build recipe (Bristen / x86_64).
 - `Containerfile.clariden`: container build recipe for Clariden (GH200 / aarch64).
 
 The EDF uses Pyxis-compatible variable expansion only. Keep it simple (plain `${VAR}` passthroughs).
@@ -59,6 +79,14 @@ export PYTHONPATH=$PWD/src
 ```
 
 This gives you a current Python toolchain for validation and development without making `uenv` part of the runtime job.
+
+**Recommended**: after the venv is created, use `./run_uenv.sh` as the default entry point for all Python commands. It automatically activates the venv, sets `PYTHONPATH`, loads HF cache paths, sources `.env` (for `HF_TOKEN`), and installs dependencies from `requirements.txt` if they changed:
+
+```bash
+./run_uenv.sh python scripts/generate_chatml.py --help
+./run_uenv.sh python scripts/curate_jsonl.py --help
+./run_uenv.sh bash
+```
 
 ## Local CLI usage
 
@@ -117,6 +145,26 @@ python scripts/generate_chatml.py \
 For parquet input you can repeat `--parquet-file` to combine multiple exact files or glob patterns into one JSONL. When you select parquet files, `--split` is still accepted and is used as the logical split label written into the output metadata.
 
 By default the generator requests Qwen3.5 in non-thinking mode through the OpenAI-compatible API, which is more reliable for strict JSON output. Pass `--enable-thinking` only if you explicitly want reasoning traces.
+
+### Async generation (higher throughput)
+
+The async generator (`scripts/generate_chatml_async.py`) uses `aiohttp` for non-blocking HTTP requests, delivering 50–80× higher throughput than the synchronous version. It shares the same source arguments as `generate_chatml.py` and adds two controls:
+
+```bash
+python scripts/generate_chatml_async.py \
+	--dataset glossAPI/<dataset_name> \
+	--split train \
+	--out outputs/synthetic_chatml.jsonl \
+	--api-base http://localhost:8000/v1 \
+	--model Qwen/Qwen3.5-397B-A17B \
+	--max-rows 10000 \
+	--concurrency 64 \
+	--batch-size 2000
+```
+
+- `--concurrency` (default 64): maximum simultaneous in-flight requests to the vLLM server.
+- `--batch-size` (default 2000): rows to collect before sorting and flushing to disk. Output is written in row-index order within each batch so resumability is preserved.
+- Default `--timeout-seconds` is 600 in async mode (vs 180 in sync mode).
 
 ## Combine existing JSONL outputs
 
@@ -177,11 +225,32 @@ Deterministic-only mode skips the LLM review stage and keeps only the rule-based
 
 Curation behavior summary:
 
-- Accepted samples are written into one file per category: `politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, `religion.jsonl`, `education.jsonl`, `philosophy.jsonl`, `sports.jsonl`, `business.jsonl`, `economics.jsonl`, `law.jsonl`, `mythology.jsonl`, `literature.jsonl`, `music.jsonl`, `general.jsonl`.
+- Accepted samples are written into one file per category: `politics.jsonl`, `science.jsonl`, `medicine.jsonl`, `technology.jsonl`, `art.jsonl`, `history.jsonl`, `geography.jsonl`, `religion.jsonl`, `education.jsonl`, `philosophy.jsonl`, `sports.jsonl`, `business.jsonl`, `economics.jsonl`, `law.jsonl`, `mythology.jsonl`, `literature.jsonl`, `music.jsonl`, `general.jsonl`.
 - Rejected samples can be logged with reason codes via `--reject-log`.
 - Resume state and the MinHash-LSH near-duplicate index are stored in a SQLite DB at `--state-db` or, by default, `${out_dir}/.curation_state.sqlite3`.
 - Re-running the same command continues from the highest processed `meta.source_row_index`, so it is safe to use when the source JSONL is still growing.
 - If `--tokenizer-model` is set, the tool uses the model tokenizer for context-window token counting; this requires `transformers` in `.venv-uenv`.
+
+### Async curation (higher throughput)
+
+The async curation script (`scripts/curate_jsonl_async.py`) uses `aiohttp` for concurrent LLM reviews and streams the input JSONL one row at a time (never loads the full file into memory). It shares the same arguments as `curate_jsonl.py` and adds two controls:
+
+```bash
+./run_uenv.sh python scripts/curate_jsonl_async.py \
+	outputs/combined_deduped_Wikisource_Greek_texts.jsonl \
+	--out-dir "${SCRATCH}/synthetics" \
+	--reject-log "${SCRATCH}/synthetics/rejects_wikisource.jsonl" \
+	--tokenizer-model Qwen/Qwen3.5-397B-A17B-FP8 \
+	--api-base http://localhost:8000/v1 \
+	--model Qwen/Qwen3.5-397B-A17B-FP8 \
+	--curation-concurrency 16 \
+	--curation-batch-size 200
+```
+
+- `--curation-concurrency` (default 16): maximum simultaneous in-flight LLM review requests.
+- `--curation-batch-size` (default 200): rows to process before reporting progress.
+- Deduplication (exact + near-duplicate via MinHash-LSH) runs **before** the LLM review so duplicates don't consume GPU compute.
+- Memory usage is O(batch_size + concurrency), not O(total rows).
 
 ## Container build on Alps
 
@@ -288,7 +357,7 @@ If you pass a comma-separated dataset list via a wrapper script, prefer `./prefe
 ## Bristen runtime workflow
 
 1. Use `uenv` to create a current Python environment and validate the generator.
-2. Build the runtime container and import it to `${SCRATCH}/images/gsdg-qwen3_latest.sqsh` (Bristen) or `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh` (Clariden).
+2. Build the runtime container and import it to `${SCRATCH}/images/gsdg-qwen3_latest.sqsh` (Bristen) or `${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh` (Clariden).
 3. Copy `edf/qwen3.toml.example` to `~/.edf/qwen3.toml` and fill any environment-specific values.
 4. Optionally prefetch the model and datasets into `${SCRATCH}` with `scripts/prefetch_hf_assets.sh`.
 5. Submit `scripts/run_gsdg_qwen3.sh` with the required environment variables.
@@ -344,14 +413,16 @@ Clariden-specific notes:
 - Some Clariden configurations can transiently reject multiple Slurm steps (“step creation temporarily disabled”). The provided scripts run server + health + one request / generation inside a single `srun` step to avoid this.
 - The Slurm scripts may “stage” the current repo into `$SCRATCH` and set `PYTHONPATH` inside the container so that small Python changes take effect without rebuilding the `.sqsh`. Disable with `STAGE_WORKSPACE=0`.
 
-See `Agents.md` for the full Bristen runbook and cluster-specific operational guidance.
+See `Agents.md` for the full Bristen and Clariden runbook and cluster-specific operational guidance.
 
 ## Clariden runtime workflow
 
 1. Build/import the Clariden image (see above).
-2. Copy `edf/qwen3_clariden.toml.example` to `~/.edf/qwen3-clariden.toml` and adjust the `image = ...` path if needed.
-3. For the validated 32B path, use the existing single-node wrappers.
-4. For the 397B path, use `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`, which now defaults to `Qwen/Qwen3.5-397B-A17B-FP8` on a 2-node Clariden allocation shape.
+2. Copy `edf/qwen3_clariden.toml.example` to `~/.edf/qwen3-clariden.toml` and adjust the `image = ...` path if needed (defaults to `${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh`).
+3. For the validated 32B path, use the existing single-node wrappers under `scripts/helpers/`.
+4. For the 397B path, use `scripts/run_gsdg_qwen3_397b_clariden_multinode.sh`, which defaults to `Qwen/Qwen3.5-397B-A17B-FP8` on a 2-node Clariden allocation shape.
+5. For the async 397B generator (higher throughput), use `scripts/run_gsdg_qwen3_397b_clariden_async.sh`.
+6. For the 397B-FP8 convenience wrapper, use `scripts/helpers/run_single_dataset_397b-fp8.sh`.
 
 To curate an existing generator-produced JSONL with the 397B model in the same Slurm allocation, submit the dedicated launcher:
 
@@ -371,6 +442,15 @@ export INPUT_JSONL=/users/p-skarvelis/GSDG/outputs/combined_deduped_Wikisource_G
 export CURATION_OUT_DIR=${SCRATCH}/synthetics
 export DISABLE_LLM_REVIEW=1
 sbatch scripts/run_curate_qwen3_397b_clariden_multinode.sh
+```
+
+For async curation (concurrent LLM reviews, higher throughput), use:
+
+```bash
+export INPUT_JSONL=/users/p-skarvelis/GSDG/outputs/combined_deduped_Wikisource_Greek_texts.jsonl
+export CURATION_OUT_DIR=${SCRATCH}/synthetics
+export REJECT_LOG=${SCRATCH}/synthetics/rejects_wikisource.jsonl
+sbatch scripts/run_curate_qwen3_397b_clariden_async.sh
 ```
 
 Current 397B Clariden status:
