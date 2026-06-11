@@ -1,6 +1,6 @@
-# Agents / Runbook (CSCS Alps → Bristen + Clariden)
+# Agents / Runbook (CSCS Alps → Clariden)
 
-This repository is designed to run on CSCS Alps, on **Bristen** (A100 / x86_64) and **Clariden** (GH200 / aarch64), using:
+This repository is designed to run on CSCS Alps, on **Clariden** (GH200 / aarch64), using:
 
 - Slurm
 - `uenv` for build-time Python tooling on Alps
@@ -9,7 +9,7 @@ This repository is designed to run on CSCS Alps, on **Bristen** (A100 / x86_64) 
 The end goal is:
 
 1. Build (or pull) a container image that can run **Qwen/Qwen3-32B** and **Qwen/Qwen3.5-397B-A17B**.
-2. Run either model under Slurm on Bristen or Clariden, with the right resource shape for that model.
+2. Run either model under Slurm on Clariden, with the right resource shape for that model.
 3. Stream rows from the **GlossAPI** HuggingFace datasets, extract the “best” text field(s), and generate **Greek** synthetic (question, answer) pairs.
 4. Write output in **ChatML**-style JSONL.
 
@@ -21,7 +21,6 @@ Recommended operating split:
 
 References:
 
-- Bristen: https://docs.cscs.ch/clusters/bristen/
 - Clariden: https://docs.cscs.ch/clusters/clariden/
 - Container Engine / EDF: https://docs.cscs.ch/software/container-engine/
 - CE quick start (`srun --environment=...`): https://docs.cscs.ch/software/container-engine/#step-2-launch-a-program
@@ -83,17 +82,7 @@ Practical split for this repo:
 	- `run_single_dataset_32b.sh`
 - The generic Slurm scripts in `scripts/` currently use a **single-node** shape by default (`--nodes=1`, `--gpus-per-node=4`, `TENSOR_PARALLEL_SIZE=4`). That matches the 32B Clariden workflow and smoke tests, but it is **not** a turnkey 397B-on-Clariden launcher.
 
-### 1a) Bristen status
-
-Verified on this Bristen `normal` partition on 2026-03-20:
-
-- Nodes expose **4 GPUs per node**, not 8. `sinfo` reports `gpu:4` and node `CfgTRES` confirms `gres/gpu=4`.
-- A single-node 4-GPU smoke test with `tensor_parallel_size=4`, `--language-model-only`, and `--max-model-len 8192` still reached **CUDA OOM during model load** for `Qwen/Qwen3.5-397B-A17B`.
-- Practical consequence: this model does **not** fit on one Bristen node in the validated configuration. A real serving run will need a **multi-node setup** on Bristen or a different cluster/resource shape.
-
----
-
-## 1b) Clariden notes (GH200 / aarch64)
+## Clariden notes (GH200 / aarch64)
 
 - Clariden nodes are GH200, which means the host architecture is **aarch64**.
 - You must run an **aarch64-compatible container image** on Clariden.
@@ -103,9 +92,8 @@ Verified on this Bristen `normal` partition on 2026-03-20:
 
 Repo convention:
 
-- Bristen CE environment name: `qwen3` (expects `~/.edf/qwen3.toml`)
 - Clariden CE environment name: `qwen3-clariden` (expects `~/.edf/qwen3-clariden.toml`)
-- The Slurm scripts in `scripts/` auto-select between these using `SLURM_CLUSTER_NAME` / `SLURM_SUBMIT_HOST`.
+- The Slurm scripts in `scripts/` auto-select the environment using `SLURM_CLUSTER_NAME` / `SLURM_SUBMIT_HOST`.
 
 Convenience wrappers (repo root):
 
@@ -403,58 +391,11 @@ Notes about the current repo state:
 - The current launcher default is the **FP8** checkpoint on `2 nodes / 8 GPUs` with `tp=8, pp=1`.
 - If you switch that launcher back to the **bf16** checkpoint, do not reuse the 2-node shape; start from `4 nodes / 16 GPUs` with `tp=8, pp=2`.
 
-### 6.3 Bristen: model-card-style 8-GPU launch
-
-Create a Slurm script (example) that:
-
-- Requests 8 GPUs total
-- Starts a local OpenAI-compatible vLLM server
-
-```bash
-#!/bin/bash
-#SBATCH -A a0140
-#SBATCH --job-name=qwen3-vllm
-#SBATCH --partition=normal
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --gpus-per-node=8
-#SBATCH --cpus-per-task=32
-#SBATCH --time=02:00:00
-
-set -euo pipefail
-
-# Start the server inside the CE environment.
-srun --environment=qwen3 \
-	vllm serve Qwen/Qwen3.5-397B-A17B \
-	--host 0.0.0.0 --port 8000 \
-	--tensor-parallel-size 8 \
-	--dtype bfloat16 \
-	--max-model-len 32768 \
-	--reasoning-parser qwen3 \
-	--language-model-only
-```
-
-Submit:
-
-```bash
-sbatch run_vllm.sh
-```
-
-Notes:
-
-- Treat this as the **model-card-style launch shape**, not a validated Bristen single-node recipe for the current cluster hardware.
-- The model card also shows a vLLM variant with reasoning enabled. If you enable thinking/reasoning, make sure your downstream parsing strips `<think>...</think>`.
-- For synthetic Q/A generation, prefer API-side non-thinking mode by sending `chat_template_kwargs={"enable_thinking": False}` rather than using `/no_think` in the prompt.
-- `--language-model-only` is recommended here because the pipeline consumes text-only GlossAPI rows and does not need the vision stack loaded.
-
-### 6.4 Clariden or Bristen: multi-node notes
+ Clariden: multi-node notes
 
 If you need more memory/throughput than a single node, run multi-node on **Clariden** (https://docs.cscs.ch/clusters/clariden/), which provides **GH200** nodes.
 
-Key Clariden differences vs Bristen:
-
-- Clariden nodes have **4 GPUs per node** (GH200). To get 8-way tensor parallelism you typically request **2 nodes**.
-- Clariden has `normal` and `debug` partitions (see the Clariden docs for current limits).
+Clariden nodes have **4 GPUs per node** (GH200). To get 8-way tensor parallelism you typically request **2 nodes**.
 
 Multi-node vLLM setups are more sensitive to networking. Expect to set explicit networking env vars (NCCL/GLOO) on Alps and, if you build your own image, to consider CE hooks / optimized base images for best interconnect performance.
 
@@ -598,22 +539,20 @@ Caveats:
 
 ---
 
-## 9) Troubleshooting (Bristen / vLLM)
+## 9) Troubleshooting (vLLM)
 
 ### 9.1 vLLM hangs on distributed init
 
-On Bristen, vLLM (and/or torch distributed) can hang if it binds to an unusable IP/interface.
+If vLLM (and/or torch distributed) hangs during distributed init, it may be binding to an unusable IP/interface.
 
 If you see hangs at/after torch distributed init, try pinning NCCL/GLOO to the high-speed interface and setting vLLM host IP:
 
 ```toml
 [env]
-NCCL_SOCKET_IFNAME = "hsn0"
-GLOO_SOCKET_IFNAME = "hsn0"
-VLLM_HOST_IP = "<IPv4 of hsn0>"
+NCCL_SOCKET_IFNAME = "nmn0"
+GLOO_SOCKET_IFNAME = "nmn0"
+VLLM_HOST_IP = "<IPv4 of nmn0>"
 ```
-
-If `hsn0` is not present, try `nmn0`.
 
 ### 9.2 vLLM V1 multiprocessing deadlocks
 
@@ -629,7 +568,7 @@ VLLM_ENABLE_V1_MULTIPROCESSING = "0"
 ## 10) What “done” looks like
 
 - A `uenv`-based build-time Python workflow exists for local validation on Alps.
-- CE environments exist for the target cluster: `qwen3` on Bristen and `qwen3-clariden` on Clariden.
+- CE environments exist for the target cluster: `qwen3-clariden` on Clariden.
 - A prefetch job can populate `${SCRATCH}` caches with model weights and dataset artifacts.
 - A Clariden single-node job can run `Qwen/Qwen3-32B` on `1 node / 4 GPUs`.
 - A multi-node job shape is defined for `Qwen/Qwen3.5-397B-A17B` on systems that expose only `4 GPUs per node`, such as Clariden.
