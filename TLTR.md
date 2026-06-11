@@ -57,46 +57,6 @@ Note: `glossAPI/istorima` currently has no loadable dataset files on the Hub
 
 ## 5) Full run (dataset or parquet → ChatML JSONL)
 
-Default end-to-end run for `glossAPI/Sxolika_vivlia` + `Qwen/Qwen3-32B`:
-
-```bash
-./run_single_dataset_32b.sh
-```
-
-Specific parquet file from the Hugging Face repo `fffoivos/glossapi-greek-nanochat-pretraining-dataset`:
-
-```bash
-unset DATASET_NAME
-export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
-export PARQUET_FILES=1000_prwta_xronia_ellhnikhs.parquet
-./run_single_dataset_32b.sh
-```
-
-All matching HPLT parquet shards from the same Hugging Face repo into one JSONL:
-
-```bash
-unset DATASET_NAME
-export HF_PARQUET_REPO=fffoivos/glossapi-greek-nanochat-pretraining-dataset
-export PARQUET_FILES='HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet'
-./run_single_dataset_32b.sh
-```
-
-Local parquet file or local parquet glob:
-
-```bash
-unset DATASET_NAME
-unset HF_PARQUET_REPO
-export PARQUET_FILES=/path/to/my_downloaded_file.parquet
-./run_single_dataset_32b.sh
-
-unset DATASET_NAME
-unset HF_PARQUET_REPO
-export PARQUET_FILES='/path/to/HPLT__ell_Grek_ge8_no_mt_clean60.part-*.parquet'
-./run_single_dataset_32b.sh
-```
-
-If you want to combine multiple exact files or patterns in one run, set `PARQUET_FILES` as a comma-separated list.
-
 By default the Slurm scripts stage the current repo into `$SCRATCH` and set
 `PYTHONPATH` inside the container, so small Python changes take effect without
 rebuilding the `.sqsh`.
@@ -188,26 +148,3 @@ Logs:
 
 - follow `slurm-<jobid>.out` for the launcher progress and the final server-log path,
 - or tail the vLLM log in the job working directory, typically `${SCRATCH}/vllm-curate-397b-node0.log` (and `node1.log` for the second node).
-  
-
-
-# some more examples of curation runs with different inputs and settings:
-
-export INPUT_JSONL=/capstor/store/cscs/swissai/a0140/p-skarvelis/prepared-datasets/synthetics/general.jsonl
-export CURATION_OUT_DIR=${SCRATCH}/synthetics
-export REJECT_LOG=${SCRATCH}/synthetics/rejects_wikisource.jsonl
-sbatch scripts/run_curate_qwen3_397b_clariden_multinode.sh
-
-
-export INPUT_JSONL="/capstor/store/cscs/swissai/a0140/p-skarvelis/prepared-datasets/synthetics/general.jsonl"
-export CURATION_OUT_DIR=${SCRATCH}/synthetics
-export REJECT_LOG=${SCRATCH}/synthetics/general_second_pass.jsonl
-export CURATION_CONCURRENCY=32
-sbatch scripts/run_curate_qwen3_397b_clariden_async.sh
-
-
-export INPUT_JSONL="/capstor/store/cscs/swissai/a0140/p-skarvelis/prepared-datasets/synthetic_chatml_397b-greek_phd.jsonl"
-export CURATION_OUT_DIR=${SCRATCH}/synthetics
-export REJECT_LOG=${SCRATCH}/synthetics/rejects_greek_phd.jsonl
-export CURATION_CONCURRENCY=32
-sbatch scripts/run_curate_qwen3_397b_clariden_async.sh
