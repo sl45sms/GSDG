@@ -189,3 +189,25 @@ Logs:
 - follow `slurm-<jobid>.out` for the launcher progress and the final server-log path,
 - or tail the vLLM log in the job working directory, typically `${SCRATCH}/vllm-curate-397b-node0.log` (and `node1.log` for the second node).
   
+
+
+# some more examples of curation runs with different inputs and settings:
+
+export INPUT_JSONL=/capstor/store/cscs/swissai/a0140/p-skarvelis/prepared-datasets/synthetics/general.jsonl
+export CURATION_OUT_DIR=${SCRATCH}/synthetics
+export REJECT_LOG=${SCRATCH}/synthetics/rejects_wikisource.jsonl
+sbatch scripts/run_curate_qwen3_397b_clariden_multinode.sh
+
+
+export INPUT_JSONL="/capstor/store/cscs/swissai/a0140/p-skarvelis/prepared-datasets/synthetics/general.jsonl"
+export CURATION_OUT_DIR=${SCRATCH}/synthetics
+export REJECT_LOG=${SCRATCH}/synthetics/general_second_pass.jsonl
+export CURATION_CONCURRENCY=32
+sbatch scripts/run_curate_qwen3_397b_clariden_async.sh
+
+
+export INPUT_JSONL="/capstor/store/cscs/swissai/a0140/p-skarvelis/prepared-datasets/synthetic_chatml_397b-greek_phd.jsonl"
+export CURATION_OUT_DIR=${SCRATCH}/synthetics
+export REJECT_LOG=${SCRATCH}/synthetics/rejects_greek_phd.jsonl
+export CURATION_CONCURRENCY=32
+sbatch scripts/run_curate_qwen3_397b_clariden_async.sh
