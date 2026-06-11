@@ -570,7 +570,6 @@ VLLM_ENABLE_V1_MULTIPROCESSING = "0"
 - A `uenv`-based build-time Python workflow exists for local validation on Alps.
 - CE environments exist for the target cluster: `qwen3-clariden` on Clariden.
 - A prefetch job can populate `${SCRATCH}` caches with model weights and dataset artifacts.
-- A Clariden single-node job can run `Qwen/Qwen3-32B` on `1 node / 4 GPUs`.
 - A multi-node job shape is defined for `Qwen/Qwen3.5-397B-A17B` on systems that expose only `4 GPUs per node`, such as Clariden.
 - A generator script can stream GlossAPI rows and write ChatML JSONL with Greek Q/A pairs.
 
